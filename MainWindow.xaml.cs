@@ -33,11 +33,15 @@ namespace ForcePlateDevTool
         private readonly object _rawLock = new();
         private readonly DispatcherTimer _rawFlushTimer;
 
+        private readonly List<FrameRow> _pendingFrames = new();
+        private readonly object _framesLock = new();
+
         private long _byteCount;
         private long _frameCount;
         private long _errorCount;
         private int _frameIndex;
         private bool _rawDirty;
+        private long _lastReceiveTicks;
 
         public MainWindow()
         {
@@ -53,7 +57,11 @@ namespace ForcePlateDevTool
             {
                 Interval = TimeSpan.FromMilliseconds(100)
             };
-            _rawFlushTimer.Tick += (_, _) => FlushRawBuffer();
+            _rawFlushTimer.Tick += (_, _) =>
+            {
+                FlushRawBuffer();
+                FlushPendingFrames();
+            };
             _rawFlushTimer.Start();
 
             Closed += (_, _) =>
@@ -162,12 +170,9 @@ namespace ForcePlateDevTool
 
         private void OnRawBytes(object? sender, RawBytesEventArgs e)
         {
-            long totalBytes;
-
             lock (_rawLock)
             {
                 _byteCount += e.Bytes.Length;
-                totalBytes = _byteCount;
 
                 foreach (byte b in e.Bytes)
                 {
@@ -184,86 +189,105 @@ namespace ForcePlateDevTool
                 _rawDirty = true;
             }
 
-            Dispatcher.InvokeAsync(() =>
-            {
-                TxtByteCount.Text = totalBytes.ToString();
-                SetStage(
-                    TxtReceiveStageStatus,
-                    $"正在接收 · {e.Timestamp:HH:mm:ss}",
-                    Brushes.ForestGreen);
-            });
+            Interlocked.Exchange(ref _lastReceiveTicks, e.Timestamp.Ticks);
         }
 
         private void FlushRawBuffer()
         {
-            string snapshot;
             long totalBytes;
+            long lastTicks = Interlocked.Read(ref _lastReceiveTicks);
 
             lock (_rawLock)
             {
-                if (!_rawDirty)
-                    return;
-
-                snapshot = _rawBuilder.ToString();
                 totalBytes = _byteCount;
-                _rawDirty = false;
+
+                if (_rawDirty)
+                {
+                    string snapshot = _rawBuilder.ToString();
+                    _rawDirty = false;
+
+                    TxtRawStream.Text = snapshot;
+                    TxtRawHeader.Text = $"累计接收 {totalBytes:N0} 字节（显示最近缓存内容）";
+                    TxtRawStream.ScrollToEnd();
+                }
             }
 
-            TxtRawStream.Text = snapshot;
-            TxtRawHeader.Text = $"累计接收 {totalBytes:N0} 字节（显示最近缓存内容）";
-            TxtRawStream.ScrollToEnd();
+            TxtByteCount.Text = totalBytes.ToString();
+
+            if (lastTicks > 0)
+            {
+                SetStage(
+                    TxtReceiveStageStatus,
+                    $"正在接收 · {new DateTime(lastTicks):HH:mm:ss}",
+                    Brushes.ForestGreen);
+            }
+        }
+
+        private void FlushPendingFrames()
+        {
+            List<FrameRow> batch;
+            lock (_framesLock)
+            {
+                if (_pendingFrames.Count == 0)
+                    return;
+                batch = _pendingFrames.ToList();
+                _pendingFrames.Clear();
+            }
+
+            foreach (var row in batch)
+            {
+                _frames.Add(row);
+            }
+
+            while (_frames.Count > 500)
+                _frames.RemoveAt(0);
+
+            long totalFrames = Interlocked.Read(ref _frameCount);
+            TxtFrameCount.Text = totalFrames.ToString();
+            TxtFrameHeader.Text = $"已解码 {totalFrames:N0} 帧";
+
+            SetStage(TxtParseStageStatus, "有效帧已识别", Brushes.ForestGreen);
+            SetStage(TxtDecodeStageStatus, "已解码", Brushes.ForestGreen);
         }
 
         private void OnFrameDecoded(object? sender, FrameDecodedEventArgs e)
         {
-            long totalFrames = Interlocked.Increment(ref _frameCount);
+            Interlocked.Increment(ref _frameCount);
 
-            Dispatcher.InvokeAsync(() =>
+            var rows = new List<FrameRow>();
+
+            foreach (var obj in e.Decoded)
             {
-                TxtFrameCount.Text = totalFrames.ToString();
-                TxtFrameHeader.Text =
-                    $"已解码 {totalFrames:N0} 帧 · 当前帧长 {e.FrameBytes.Length} B";
+                if (obj is not SensorData sd)
+                    continue;
 
-                SetStage(TxtParseStageStatus, "有效帧已识别", Brushes.ForestGreen);
-
-                bool decodedAny = false;
-
-                foreach (var obj in e.Decoded)
+                var raw = new StringBuilder();
+                for (int i = 0; i < sd.Data.Length; i++)
                 {
-                    if (obj is not SensorData sd)
-                        continue;
-
-                    decodedAny = true;
-
-                    var raw = new StringBuilder();
-                    for (int i = 0; i < sd.Data.Length; i++)
-                    {
-                        raw.Append(sd.Data[i].ToString("F2", CultureInfo.InvariantCulture));
-                        if (i < sd.Data.Length - 1)
-                            raw.Append(", ");
-                    }
-
-                    var row = new FrameRow
-                    {
-                        Index = ++_frameIndex,
-                        Time = e.Timestamp.ToString("HH:mm:ss.fff"),
-                        Address = $"0x{sd.SenserAddress:X2}",
-                        Fx = sd.Fx.ToString("F3", CultureInfo.InvariantCulture),
-                        Fy = sd.Fy.ToString("F3", CultureInfo.InvariantCulture),
-                        Fz = sd.Fz.ToString("F3", CultureInfo.InvariantCulture),
-                        RawFloats = raw.ToString()
-                    };
-
-                    _frames.Add(row);
-                    if (_frames.Count > 500)
-                        _frames.RemoveAt(0);
+                    raw.Append(sd.Data[i].ToString("F2", CultureInfo.InvariantCulture));
+                    if (i < sd.Data.Length - 1)
+                        raw.Append(", ");
                 }
 
-                if (decodedAny)
+                rows.Add(new FrameRow
                 {
-                    SetStage(TxtDecodeStageStatus, "已解码", Brushes.ForestGreen);
+                    Index = Interlocked.Increment(ref _frameIndex),
+                    Time = e.Timestamp.ToString("HH:mm:ss.fff"),
+                    Address = $"0x{sd.SenserAddress:X2}",
+                    Fx = sd.Fx.ToString("F3", CultureInfo.InvariantCulture),
+                    Fy = sd.Fy.ToString("F3", CultureInfo.InvariantCulture),
+                    Fz = sd.Fz.ToString("F3", CultureInfo.InvariantCulture),
+                    RawFloats = raw.ToString()
+                });
+            }
+
+            if (rows.Count > 0)
+            {
+                lock (_framesLock)
+                {
+                    _pendingFrames.AddRange(rows);
                 }
-            });
+            }
         }
 
         private async void BtnPing_Click(object sender, RoutedEventArgs e)
@@ -406,8 +430,13 @@ namespace ForcePlateDevTool
 
         private void BtnClearFrames_Click(object sender, RoutedEventArgs e)
         {
+            lock (_framesLock)
+            {
+                _pendingFrames.Clear();
+            }
+
             _frames.Clear();
-            _frameIndex = 0;
+            Interlocked.Exchange(ref _frameIndex, 0);
             Interlocked.Exchange(ref _frameCount, 0);
             TxtFrameCount.Text = "0";
             TxtFrameHeader.Text = "帧列表已清空";

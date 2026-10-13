@@ -392,6 +392,8 @@ public class SocketLinker : LinkerBase
                             array = buffer.Take(size).ToArray();
                             return size;
                         }
+
+                        Thread.Sleep(1);
                     }
                     break;
                 case SocketMode.Server:
@@ -411,6 +413,9 @@ public class SocketLinker : LinkerBase
                         while (DateTime.Now < deadLine && array.Length == 0)
                         {
                             array = _TempBuffer.ReadAll();
+
+                            if (array.Length == 0)
+                                Thread.Sleep(1);
                         }
 
                         return array.Length;
