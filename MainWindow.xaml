@@ -218,7 +218,7 @@
                 </Border>
                 <Border Style="{StaticResource StageCard}">
                     <StackPanel>
-                        <TextBlock Text="02  TCP 连接" FontWeight="SemiBold"/>
+                        <TextBlock Text="02  UDP 连接" FontWeight="SemiBold"/>
                         <TextBlock x:Name="TxtTcpStageStatus"
                                    Text="未连接" Style="{StaticResource StageStatus}"/>
                     </StackPanel>

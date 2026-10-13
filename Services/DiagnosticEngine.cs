@@ -62,8 +62,8 @@ public class DiagnosticEngine : IDisposable
                 RemotePort = Config.RemotePort,
                 LocalIP = Config.LocalIP,
                 LocalPort = Config.LocalPort,
-                SocketMode = SocketMode.Client,
-                BindLocal = false
+                SocketMode = SocketMode.UDP,
+                BindLocal = true
             };
 
             _linker = new SocketLinker(socketConfig);
