@@ -72,7 +72,7 @@ public class DiagnosticEngine : IDisposable
             if (opened)
             {
                 BuildDecoder();
-                LinkStateChanged?.Invoke(this, new LinkStateEventArgs(true, $"已连接 {Config.RemoteIP}:{Config.RemotePort}"));
+                LinkStateChanged?.Invoke(this, new LinkStateEventArgs(true, $"已就绪 {Config.RemoteIP}:{Config.RemotePort}"));
                 return true;
             }
 

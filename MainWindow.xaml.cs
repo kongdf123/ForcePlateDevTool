@@ -73,7 +73,7 @@ namespace ForcePlateDevTool
             };
 
             SetStage(TxtNetworkStageStatus, "待检测", Brushes.Gray);
-            SetStage(TxtTcpStageStatus, "未连接", Brushes.Gray);
+            SetStage(TxtTcpStageStatus, "未就绪", Brushes.Gray);
             SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
             SetStage(TxtReceiveStageStatus, "等待数据", Brushes.Gray);
             SetStage(TxtParseStageStatus, "等待帧", Brushes.Gray);
@@ -158,12 +158,17 @@ namespace ForcePlateDevTool
 
                 SetStage(
                     TxtTcpStageStatus,
-                    e.IsConnected ? "已连接" : "未连接",
+                    e.IsConnected ? "已就绪" : "未就绪",
                     e.IsConnected ? Brushes.ForestGreen : Brushes.Gray);
 
                 if (!e.IsConnected)
                 {
+                    Interlocked.Exchange(ref _lastReceiveTicks, 0);
+
+                    SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
                     SetStage(TxtReceiveStageStatus, "等待连接", Brushes.Gray);
+                    SetStage(TxtParseStageStatus, "等待帧", Brushes.Gray);
+                    SetStage(TxtDecodeStageStatus, "等待解码", Brushes.Gray);
                 }
             });
 
@@ -216,7 +221,7 @@ namespace ForcePlateDevTool
 
             TxtByteCount.Text = totalBytes.ToString();
 
-            if (lastTicks > 0)
+            if (lastTicks > 0 && _engine.IsConnected)
             {
                 SetStage(
                     TxtReceiveStageStatus,
@@ -331,7 +336,7 @@ namespace ForcePlateDevTool
                 bool ok = result.Contains("成功", StringComparison.Ordinal);
                 SetStage(
                     TxtNetworkStageStatus,
-                    ok ? "可达" : "未确认可达",
+                    ok ? "可达" : "不可达",
                     ok ? Brushes.ForestGreen : Brushes.OrangeRed);
             }
             finally
@@ -343,11 +348,29 @@ namespace ForcePlateDevTool
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
             BtnConnect.IsEnabled = false;
-            SetStage(TxtTcpStageStatus, "连接中", Brushes.DarkOrange);
+            SetStage(TxtTcpStageStatus, "检测中", Brushes.DarkOrange);
 
             try
             {
                 _engine.Configure(BuildConfig());
+
+                string ip = TxtRemoteIP.Text.Trim();
+                string pingResult = await _engine.PingAsync(ip, 1500);
+                bool reachable = pingResult.Contains("成功", StringComparison.Ordinal);
+                Log(pingResult);
+                SetStage(
+                    TxtNetworkStageStatus,
+                    reachable ? "可达" : "不可达",
+                    reachable ? Brushes.ForestGreen : Brushes.OrangeRed);
+
+                if (!reachable)
+                {
+                    SetStage(TxtTcpStageStatus, "未就绪", Brushes.Gray);
+                    Log($"连接中止: 设备 {ip} 不可达，请检查设备电源、网络连接及 IP 地址配置。");
+                    return;
+                }
+
+                SetStage(TxtTcpStageStatus, "建立中", Brushes.DarkOrange);
                 bool ok = await _engine.ConnectAsync();
 
                 if (ok)
@@ -363,7 +386,7 @@ namespace ForcePlateDevTool
             catch (Exception ex)
             {
                 Log($"连接操作失败: {ex.Message}");
-                SetStage(TxtTcpStageStatus, "连接异常", Brushes.OrangeRed);
+                SetStage(TxtTcpStageStatus, "异常", Brushes.OrangeRed);
             }
             finally
             {
