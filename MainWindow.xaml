@@ -25,7 +25,7 @@
                     <TextBlock FontWeight="Bold" Margin="0,0,0,4">连接参数</TextBlock>
                     <UniformGrid Columns="2">
                         <TextBlock VerticalAlignment="Center" Margin="0,0,4,4">远端 IP:</TextBlock>
-                        <TextBox x:Name="TxtRemoteIP" Text="192.168.1.101" Width="120" Margin="0,0,0,4"/>
+                        <TextBox x:Name="TxtRemoteIP" Text="192.168.1.25" Width="120" Margin="0,0,0,4"/>
                         <TextBlock VerticalAlignment="Center" Margin="0,0,4,4">远端端口:</TextBlock>
                         <TextBox x:Name="TxtRemotePort" Text="5152" Width="120" Margin="0,0,0,4"/>
                         <TextBlock VerticalAlignment="Center" Margin="0,0,4,4">本地 IP:</TextBlock>

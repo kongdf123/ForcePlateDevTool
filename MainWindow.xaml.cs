@@ -246,6 +246,11 @@ namespace ForcePlateDevTool
 
         private void CmbPresetCmd_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            if (TxtRawCmd == null)
+            {
+                return;
+            }
+
             if (CmbPresetCmd.SelectedItem is ComboBoxItem item && item.Tag is string hex)
             {
                 TxtRawCmd.Text = hex;
