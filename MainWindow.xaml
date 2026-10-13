@@ -289,7 +289,9 @@
                               RowHeaderWidth="0"
                               EnableRowVirtualization="True">
                         <DataGrid.Columns>
+                            <DataGridTextColumn Header="帧序号" Binding="{Binding FrameSeq}" Width="70"/>
                             <DataGridTextColumn Header="序号" Binding="{Binding Index}" Width="60"/>
+                            <DataGridTextColumn Header="踏板" Binding="{Binding Pedal}" Width="75"/>
                             <DataGridTextColumn Header="时间" Binding="{Binding Time}" Width="130"/>
                             <DataGridTextColumn Header="地址" Binding="{Binding Address}" Width="65"/>
                             <DataGridTextColumn Header="Fx" Binding="{Binding Fx}" Width="100"/>

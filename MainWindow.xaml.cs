@@ -16,7 +16,9 @@ namespace ForcePlateDevTool
 {
     public class FrameRow
     {
+        public int FrameSeq { get; set; }
         public int Index { get; set; }
+        public string Pedal { get; set; } = "";
         public string Time { get; set; } = "";
         public string Address { get; set; } = "";
         public string Fx { get; set; } = "";
@@ -250,43 +252,68 @@ namespace ForcePlateDevTool
             SetStage(TxtDecodeStageStatus, "已解码", Brushes.ForestGreen);
         }
 
+        private static string MapPedal(byte address)
+        {
+            return address switch
+            {
+                0xAA => "左踏板",
+                0xAB => "右踏板",
+                _ => $"未知(0x{address:X2})"
+            };
+        }
+
         private void OnFrameDecoded(object? sender, FrameDecodedEventArgs e)
         {
-            Interlocked.Increment(ref _frameCount);
-
-            var rows = new List<FrameRow>();
-
-            foreach (var obj in e.Decoded)
+            try
             {
-                if (obj is not SensorData sd)
-                    continue;
+                long frameSeq = Interlocked.Increment(ref _frameCount);
 
-                var raw = new StringBuilder();
-                for (int i = 0; i < sd.Data.Length; i++)
+                var rows = new List<FrameRow>();
+
+                if (e.Decoded == null)
+                    return;
+
+                foreach (var obj in e.Decoded)
                 {
-                    raw.Append(sd.Data[i].ToString("F2", CultureInfo.InvariantCulture));
-                    if (i < sd.Data.Length - 1)
-                        raw.Append(", ");
+                    if (obj is not SensorData sd)
+                        continue;
+
+                    float[] data = sd.Data ?? Array.Empty<float>();
+                    int usedCount = Math.Min(data.Length, 9);
+
+                    var raw = new StringBuilder();
+                    for (int i = 0; i < usedCount; i++)
+                    {
+                        raw.Append(data[i].ToString("F2", CultureInfo.InvariantCulture));
+                        if (i < usedCount - 1)
+                            raw.Append(", ");
+                    }
+
+                    rows.Add(new FrameRow
+                    {
+                        FrameSeq = (int)frameSeq,
+                        Index = Interlocked.Increment(ref _frameIndex),
+                        Pedal = MapPedal(sd.SenserAddress),
+                        Time = e.Timestamp.ToString("HH:mm:ss.fff"),
+                        Address = $"0x{sd.SenserAddress:X2}",
+                        Fx = sd.Fx.ToString("F3", CultureInfo.InvariantCulture),
+                        Fy = sd.Fy.ToString("F3", CultureInfo.InvariantCulture),
+                        Fz = sd.Fz.ToString("F3", CultureInfo.InvariantCulture),
+                        RawFloats = raw.ToString()
+                    });
                 }
 
-                rows.Add(new FrameRow
+                if (rows.Count > 0)
                 {
-                    Index = Interlocked.Increment(ref _frameIndex),
-                    Time = e.Timestamp.ToString("HH:mm:ss.fff"),
-                    Address = $"0x{sd.SenserAddress:X2}",
-                    Fx = sd.Fx.ToString("F3", CultureInfo.InvariantCulture),
-                    Fy = sd.Fy.ToString("F3", CultureInfo.InvariantCulture),
-                    Fz = sd.Fz.ToString("F3", CultureInfo.InvariantCulture),
-                    RawFloats = raw.ToString()
-                });
+                    lock (_framesLock)
+                    {
+                        _pendingFrames.AddRange(rows);
+                    }
+                }
             }
-
-            if (rows.Count > 0)
+            catch (Exception ex)
             {
-                lock (_framesLock)
-                {
-                    _pendingFrames.AddRange(rows);
-                }
+                Dispatcher.InvokeAsync(() => Log($"OnFrameDecoded 异常: {ex}"));
             }
         }
 
@@ -328,6 +355,9 @@ namespace ForcePlateDevTool
                     SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
                     SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
                     _engine.StartReceiveLoop();
+                    await _engine.SendStartCommandAsync();
+                    SetStage(TxtCommandStageStatus, "已发送开始指令", Brushes.DarkOrange);
+                    Log("已自动发送开始采集指令");
                 }
             }
             catch (Exception ex)

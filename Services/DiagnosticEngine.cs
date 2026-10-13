@@ -241,7 +241,7 @@ public class DiagnosticEngine : IDisposable
         }
         catch (Exception ex)
         {
-            LogMessage?.Invoke(this, $"解码异常: {ex.Message}");
+            LogMessage?.Invoke(this, $"解码异常: {ex}");
         }
     }
 
@@ -266,19 +266,34 @@ public class DiagnosticEngine : IDisposable
 
     public Task SendStartCommandAsync()
     {
-        byte cmd = Config.CollectionMode switch
+        if (_decoder == null)
         {
-            CollectionMode.Passive => 0x30,
-            CollectionMode.Initiative => 0x31,
-            CollectionMode.OnlyTrigger => 0x3A,
-            _ => 0x30
+            LogMessage?.Invoke(this, "无法发送开始指令: 解码器未就绪");
+            return Task.CompletedTask;
+        }
+
+        KW_CMD cmd = Config.CollectionMode switch
+        {
+            CollectionMode.Passive => KW_CMD.CMD48,
+            CollectionMode.Initiative => KW_CMD.CMD49,
+            CollectionMode.OnlyTrigger => KW_CMD.CMD58,
+            _ => KW_CMD.CMD48
         };
-        return SendCommandAsync(new[] { cmd });
+
+        byte[] bytes = _decoder.GetCommand((int)cmd, Config.StationAddress);
+        return SendCommandAsync(bytes);
     }
 
     public Task SendStopCommandAsync()
     {
-        return SendCommandAsync(new byte[] { 0x2B });
+        if (_decoder == null)
+        {
+            LogMessage?.Invoke(this, "无法发送停止指令: 解码器未就绪");
+            return Task.CompletedTask;
+        }
+
+        byte[] bytes = _decoder.GetCommand((int)KW_CMD.CMD43, Config.StationAddress);
+        return SendCommandAsync(bytes);
     }
 
     public void Dispose()
