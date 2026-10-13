@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 using KW.CommunicationLib.Configuration;
@@ -48,17 +49,42 @@ namespace ForcePlateDevTool
             _engine.LinkStateChanged += OnLinkState;
             _engine.LogMessage += OnLogMessage;
 
-            _rawFlushTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _rawFlushTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(100)
+            };
             _rawFlushTimer.Tick += (_, _) => FlushRawBuffer();
             _rawFlushTimer.Start();
 
-            Closed += (_, _) => { _engine.Dispose(); };
+            Closed += (_, _) =>
+            {
+                _rawFlushTimer.Stop();
+                _engine.Dispose();
+            };
+
+            SetStage(TxtNetworkStageStatus, "待检测", Brushes.Gray);
+            SetStage(TxtTcpStageStatus, "未连接", Brushes.Gray);
+            SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
+            SetStage(TxtReceiveStageStatus, "等待数据", Brushes.Gray);
+            SetStage(TxtParseStageStatus, "等待帧", Brushes.Gray);
+            SetStage(TxtDecodeStageStatus, "等待解码", Brushes.Gray);
+        }
+
+        private static void SetStage(TextBlock target, string message, Brush color)
+        {
+            target.Text = message;
+            target.Foreground = color;
+            target.ToolTip = message;
         }
 
         private DiagnosticConfig BuildConfig()
         {
             byte stationAddr = 0xAA;
-            if (byte.TryParse(TxtStationAddr.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out byte sa))
+            if (byte.TryParse(
+                    TxtStationAddr.Text.Trim(),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out byte sa))
             {
                 stationAddr = sa;
             }
@@ -84,98 +110,158 @@ namespace ForcePlateDevTool
 
         private void Log(string msg)
         {
-            Dispatcher.Invoke(() =>
+            if (!Dispatcher.CheckAccess())
             {
-                TxtLog.AppendText($"[{DateTime.Now:HH:mm:ss.fff}] {msg}{Environment.NewLine}");
-                TxtLog.ScrollToEnd();
-            });
+                Dispatcher.InvokeAsync(() => Log(msg));
+                return;
+            }
+
+            TxtLog.AppendText($"[{DateTime.Now:HH:mm:ss.fff}] {msg}{Environment.NewLine}");
+            TxtLog.ScrollToEnd();
         }
 
-        private void OnLogMessage(object? sender, string e) => Log(e);
+        private void OnLogMessage(object? sender, string e)
+        {
+            Log(e);
+
+            // DiagnosticEngine currently reports malformed data as log messages rather
+            // than exposing a dedicated invalid-frame event. Count these as anomaly
+            // events, not as an exact count of invalid frames.
+            if (e.Contains("无效数据", StringComparison.OrdinalIgnoreCase) ||
+                e.Contains("解码失败", StringComparison.OrdinalIgnoreCase) ||
+                e.Contains("解码异常", StringComparison.OrdinalIgnoreCase))
+            {
+                long count = Interlocked.Increment(ref _errorCount);
+                Dispatcher.InvokeAsync(() => TxtErrorCount.Text = count.ToString());
+
+                Dispatcher.InvokeAsync(() =>
+                    SetStage(TxtParseStageStatus, "发现异常数据", Brushes.OrangeRed));
+            }
+        }
 
         private void OnLinkState(object? sender, LinkStateEventArgs e)
         {
-            Dispatcher.Invoke(() =>
+            Dispatcher.InvokeAsync(() =>
             {
                 TxtStatus.Text = e.Message;
-                TxtStatus.Foreground = e.IsConnected
-                    ? System.Windows.Media.Brushes.ForestGreen
-                    : System.Windows.Media.Brushes.Gray;
+                TxtStatus.Foreground = e.IsConnected ? Brushes.ForestGreen : Brushes.Gray;
+
+                SetStage(
+                    TxtTcpStageStatus,
+                    e.IsConnected ? "已连接" : "未连接",
+                    e.IsConnected ? Brushes.ForestGreen : Brushes.Gray);
+
+                if (!e.IsConnected)
+                {
+                    SetStage(TxtReceiveStageStatus, "等待连接", Brushes.Gray);
+                }
             });
+
             Log(e.Message);
         }
 
         private void OnRawBytes(object? sender, RawBytesEventArgs e)
         {
+            long totalBytes;
+
             lock (_rawLock)
             {
                 _byteCount += e.Bytes.Length;
-                foreach (var b in e.Bytes)
+                totalBytes = _byteCount;
+
+                foreach (byte b in e.Bytes)
                 {
                     _rawBuilder.Append(b.ToString("X2"));
                     _rawBuilder.Append(' ');
                 }
+
+                // Keep the diagnostic view bounded to avoid unbounded UI memory growth.
                 if (_rawBuilder.Length > 200_000)
                 {
                     _rawBuilder.Remove(0, _rawBuilder.Length - 100_000);
                 }
+
                 _rawDirty = true;
             }
 
-            Dispatcher.Invoke(() =>
+            Dispatcher.InvokeAsync(() =>
             {
-                TxtByteCount.Text = _byteCount.ToString();
+                TxtByteCount.Text = totalBytes.ToString();
+                SetStage(
+                    TxtReceiveStageStatus,
+                    $"正在接收 · {e.Timestamp:HH:mm:ss}",
+                    Brushes.ForestGreen);
             });
         }
 
         private void FlushRawBuffer()
         {
-            if (!_rawDirty) return;
+            string snapshot;
+            long totalBytes;
+
             lock (_rawLock)
             {
-                if (!_rawDirty) return;
-                TxtRawStream.Text = _rawBuilder.ToString();
-                TxtRawHeader.Text = $"已接收 {_byteCount} 字节";
+                if (!_rawDirty)
+                    return;
+
+                snapshot = _rawBuilder.ToString();
+                totalBytes = _byteCount;
                 _rawDirty = false;
             }
+
+            TxtRawStream.Text = snapshot;
+            TxtRawHeader.Text = $"累计接收 {totalBytes:N0} 字节（显示最近缓存内容）";
+            TxtRawStream.ScrollToEnd();
         }
 
         private void OnFrameDecoded(object? sender, FrameDecodedEventArgs e)
         {
-            Interlocked.Increment(ref _frameCount);
+            long totalFrames = Interlocked.Increment(ref _frameCount);
 
-            Dispatcher.Invoke(() =>
+            Dispatcher.InvokeAsync(() =>
             {
-                TxtFrameCount.Text = _frameCount.ToString();
-                TxtFrameHeader.Text = $"已解码 {_frameCount} 帧 (帧长 {e.FrameBytes.Length}B)";
+                TxtFrameCount.Text = totalFrames.ToString();
+                TxtFrameHeader.Text =
+                    $"已解码 {totalFrames:N0} 帧 · 当前帧长 {e.FrameBytes.Length} B";
+
+                SetStage(TxtParseStageStatus, "有效帧已识别", Brushes.ForestGreen);
+
+                bool decodedAny = false;
 
                 foreach (var obj in e.Decoded)
                 {
-                    if (obj is not SensorData sd) continue;
+                    if (obj is not SensorData sd)
+                        continue;
+
+                    decodedAny = true;
 
                     var raw = new StringBuilder();
                     for (int i = 0; i < sd.Data.Length; i++)
                     {
-                        raw.Append(sd.Data[i].ToString("F2"));
-                        if (i < sd.Data.Length - 1) raw.Append(", ");
+                        raw.Append(sd.Data[i].ToString("F2", CultureInfo.InvariantCulture));
+                        if (i < sd.Data.Length - 1)
+                            raw.Append(", ");
                     }
 
                     var row = new FrameRow
                     {
-                        Index = Interlocked.Increment(ref _frameIndex),
+                        Index = ++_frameIndex,
                         Time = e.Timestamp.ToString("HH:mm:ss.fff"),
                         Address = $"0x{sd.SenserAddress:X2}",
-                        Fx = sd.Fx.ToString("F3"),
-                        Fy = sd.Fy.ToString("F3"),
-                        Fz = sd.Fz.ToString("F3"),
+                        Fx = sd.Fx.ToString("F3", CultureInfo.InvariantCulture),
+                        Fy = sd.Fy.ToString("F3", CultureInfo.InvariantCulture),
+                        Fz = sd.Fz.ToString("F3", CultureInfo.InvariantCulture),
                         RawFloats = raw.ToString()
                     };
 
                     _frames.Add(row);
                     if (_frames.Count > 500)
-                    {
                         _frames.RemoveAt(0);
-                    }
+                }
+
+                if (decodedAny)
+                {
+                    SetStage(TxtDecodeStageStatus, "已解码", Brushes.ForestGreen);
                 }
             });
         }
@@ -183,21 +269,52 @@ namespace ForcePlateDevTool
         private async void BtnPing_Click(object sender, RoutedEventArgs e)
         {
             BtnPing.IsEnabled = false;
-            var result = await _engine.PingAsync(TxtRemoteIP.Text.Trim());
-            Log(result);
-            BtnPing.IsEnabled = true;
+            SetStage(TxtNetworkStageStatus, "检测中", Brushes.DarkOrange);
+
+            try
+            {
+                string ip = TxtRemoteIP.Text.Trim();
+                string result = await _engine.PingAsync(ip);
+                Log(result);
+
+                bool ok = result.Contains("成功", StringComparison.Ordinal);
+                SetStage(
+                    TxtNetworkStageStatus,
+                    ok ? "可达" : "未确认可达",
+                    ok ? Brushes.ForestGreen : Brushes.OrangeRed);
+            }
+            finally
+            {
+                BtnPing.IsEnabled = true;
+            }
         }
 
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
             BtnConnect.IsEnabled = false;
-            _engine.Configure(BuildConfig());
-            bool ok = await _engine.ConnectAsync();
-            if (ok)
+            SetStage(TxtTcpStageStatus, "连接中", Brushes.DarkOrange);
+
+            try
             {
-                _engine.StartReceiveLoop();
+                _engine.Configure(BuildConfig());
+                bool ok = await _engine.ConnectAsync();
+
+                if (ok)
+                {
+                    SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
+                    SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
+                    _engine.StartReceiveLoop();
+                }
             }
-            BtnConnect.IsEnabled = true;
+            catch (Exception ex)
+            {
+                Log($"连接操作失败: {ex.Message}");
+                SetStage(TxtTcpStageStatus, "连接异常", Brushes.OrangeRed);
+            }
+            finally
+            {
+                BtnConnect.IsEnabled = true;
+            }
         }
 
         private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
@@ -208,25 +325,27 @@ namespace ForcePlateDevTool
         private void BtnStartReceive_Click(object sender, RoutedEventArgs e)
         {
             _engine.StartReceiveLoop();
-            Log("已启动原始数据接收（不发送采集指令）");
+            SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
+            Log("已请求启动原始数据接收（不发送采集指令）");
         }
 
         private async void BtnStart_Click(object sender, RoutedEventArgs e)
         {
             _engine.Configure(BuildConfig());
+            SetStage(TxtCommandStageStatus, "已发送开始指令", Brushes.DarkOrange);
             await _engine.SendStartCommandAsync();
-            Log("已发送开始采集指令");
+            Log("已请求发送开始采集指令");
         }
 
         private async void BtnStop_Click(object sender, RoutedEventArgs e)
         {
             await _engine.SendStopCommandAsync();
-            Log("已发送停止采集指令");
+            Log("已请求发送停止采集指令");
         }
 
         private async void BtnSendRaw_Click(object sender, RoutedEventArgs e)
         {
-            var hex = TxtRawCmd.Text.Trim();
+            string hex = TxtRawCmd.Text.Trim();
             if (string.IsNullOrEmpty(hex))
             {
                 Log("请输入要发送的 HEX 指令");
@@ -235,7 +354,7 @@ namespace ForcePlateDevTool
 
             try
             {
-                var bytes = ParseHex(hex);
+                byte[] bytes = ParseHex(hex);
                 await _engine.SendCommandAsync(bytes);
             }
             catch (Exception ex)
@@ -247,11 +366,10 @@ namespace ForcePlateDevTool
         private void CmbPresetCmd_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (TxtRawCmd == null)
-            {
                 return;
-            }
 
-            if (CmbPresetCmd.SelectedItem is ComboBoxItem item && item.Tag is string hex)
+            if (CmbPresetCmd.SelectedItem is ComboBoxItem item &&
+                item.Tag is string hex)
             {
                 TxtRawCmd.Text = hex;
             }
@@ -259,12 +377,14 @@ namespace ForcePlateDevTool
 
         private static byte[] ParseHex(string hex)
         {
-            var parts = hex.Split(new[] { ' ', ',', '-' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] parts = hex.Split(
+                new[] { ' ', ',', '-' },
+                StringSplitOptions.RemoveEmptyEntries);
+
             var bytes = new byte[parts.Length];
             for (int i = 0; i < parts.Length; i++)
-            {
                 bytes[i] = Convert.ToByte(parts[i], 16);
-            }
+
             return bytes;
         }
 
@@ -276,14 +396,21 @@ namespace ForcePlateDevTool
                 _rawDirty = true;
                 _byteCount = 0;
             }
-            Dispatcher.Invoke(() => TxtByteCount.Text = "0");
+
+            Dispatcher.InvokeAsync(() =>
+            {
+                TxtByteCount.Text = "0";
+                TxtRawHeader.Text = "原始字节显示已清空";
+            });
         }
 
         private void BtnClearFrames_Click(object sender, RoutedEventArgs e)
         {
             _frames.Clear();
             _frameIndex = 0;
+            Interlocked.Exchange(ref _frameCount, 0);
             TxtFrameCount.Text = "0";
+            TxtFrameHeader.Text = "帧列表已清空";
         }
 
         private void BtnClearLog_Click(object sender, RoutedEventArgs e)
