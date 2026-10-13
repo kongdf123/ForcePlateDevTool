@@ -33,7 +33,7 @@ public class SocketLinker : LinkerBase
     #region 变量
 
     private SocketMode _SocketMode = SocketMode.Client;
-    private string _RemoteIP = "192.168.1.101";
+    private string _RemoteIP = "192.168.1.25";
     private int _RemotePort = 5152;
     private string _LocalIP = "192.168.1.100";
     private int _LocalPort = 8886;
@@ -790,9 +790,9 @@ public class Client
 public class SocketConfig : LinkerConfig, ILinkerConfig
 {
     public SocketMode SocketMode = SocketMode.Client;
-    public string RemoteIP = "192.168.1.101";
+    public string RemoteIP = "192.168.1.25";
     public int RemotePort = 5152;
-    public string LocalIP = "192.168.1.102";
+    public string LocalIP = "192.168.1.100";
     public int LocalPort = 8886;
     public bool BindLocal = false;
 

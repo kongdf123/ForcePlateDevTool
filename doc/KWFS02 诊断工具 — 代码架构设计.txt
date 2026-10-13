@@ -156,7 +156,7 @@ csharp
 
 public class DiagnosticConfig
 {
-    public string DeviceIp { get; set; } = "192.168.1.101";
+    public string DeviceIp { get; set; } = "192.168.1.25";
     public int DevicePort { get; set; } = 5152;
     public string LocalIp { get; set; } = "192.168.1.100";
     public int LocalPort { get; set; } = 8886;
@@ -464,7 +464,7 @@ SocketLinker.OnDataReceive
     → HexStreamViewer / FrameGrid / PhysicalValuePanel
 5. 生产代码复用清单
 生产类	用途	复用方式
-SocketLinker	TCP 连接与收发	直接实例化
+SocketLinker	UDP 连接与收发	直接实例化
 SocketConfig	连接参数	直接实例化
 Decoder_76B_StartingBlock	帧切分 + 18 float 解析 + 合力计算	直接实例化
 DecoderConfig	解码器配置（台面/传感器尺寸）	直接实例化

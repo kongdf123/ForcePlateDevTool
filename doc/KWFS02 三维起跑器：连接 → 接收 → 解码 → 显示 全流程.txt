@@ -31,7 +31,7 @@ CaptureCoordinator.EnterPreviewAsync() (CaptureCoordinator.cs:136) 把通讯器�
 
 Communicator.Start() (Communicator.cs:124) 做三件事：
 
-_Linker = LinkerBase.GetLinker(_LinkerConfig) → 创建 SocketLinker（TCP，默认远程 192.168.1.101:5152，本地 192.168.1.100:8886），_Linker.Open() 建立 socket。
+_Linker = LinkerBase.GetLinker(_LinkerConfig) → 创建 SocketLinker（UDP，默认远程 192.168.1.25:5152，本地 192.168.1.100:8886），_Linker.Open() 建立 socket。
 _Decoder = DecoderBase.GetDecoder(_DecoderConfig) → 反射创建 Decoder_76B_StartingBlock 实例。
 若非 Initiative 模式，发送起始命令 0x48 AA 0D 0A（StartCMD），让设备开始推流。
 启动两个后台 Task：DataCollectTask（收字节）和 DataDecoderTask（解码）。
@@ -176,7 +176,7 @@ text
                            │ Communicator.Start()
 ┌──────────────────────────▼───────────────────────────────────────┐
 │ 通讯层 (Communicator)                                             │
-│  SocketLinker.Open()  → TCP 连接设备                               │
+│  SocketLinker.Open()  → UDP 连接设备                               │
 │  发 0x48 AA 0D 0A (StartCMD) → 设备开始推流                        │
 │                                                                   │
 │  DataCollectTask ──收字节──► _ByteDataQueue                       │
@@ -204,6 +204,6 @@ text
 关键点总结
 一个起跑器 = 2 个踏板：单帧 76 字节同时包含左(0xAA)、右(0xAB)踏板数据，解码器一次产出 2 个 SensorData。
 每踏板 9 个力值 = 3 个传感器 × 3 轴，合力 Fx/Fy/Fz 是 3 个传感器对应轴之和取反。
-连接方式：以太网 TCP（SocketLinker），被动模式下主机发 0x48 后设备持续推 76 字节帧。
+连接方式：以太网 UDP（SocketLinker），被动模式下主机发 0x48 后设备持续推 76 字节帧。
 间接通讯：副台不建通讯器（返回 null），由主台代收数据并按地址区分。
 清零：仅允许在 Previewing 状态执行（正式采 Running 时禁止，避免时间戳计数器重置导致 0.001s 重复点）。
