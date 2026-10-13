@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>ForcePlateDevTool</RootNamespace>
+    <AssemblyName>ForcePlateDevTool</AssemblyName>
+    <ApplicationIcon />
+    <StartupObject>ForcePlateDevTool.App</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="KW.Sensor.DataModel" />
+    <Using Include="KW.Commons.Tools.Queues" />
+    <Using Include="KW.Commons.Tools.Globals" />
+    <Using Include="KW.Commons.Tools.Utilities" />
+    <Using Include="KW.CommunicationLib.Linker" />
+    <Using Include="KW.CommunicationLib.Decoder" />
+    <Using Include="KW.CommunicationLib.Configuration" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="ProductionRef\**\*.cs" />
+    <None Remove="ProductionRef\**\*.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,608 @@
+KWFS02 诊断工具 — 代码架构设计
+基于现有生产代码（KW.CommunicationLib / KW.Sensor.DataModel），诊断工具采用分层 + 事件驱动架构，核心原则是：直接复用生产解码器，诊断逻辑与采集逻辑同源。
+
+1. 整体架构分层
+text
+
+
+
+┌─────────────────────────────────────────────────────────────┐
+│  Presentation Layer (WPF)                                    │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ MainWindow + 诊断树 (DiagnosticTreeView)              │   │
+│  │ Tabs: Connection / RawBytes / Frame / Physical / Report│   │
+│  └───────────────────────┬──────────────────────────────┘   │
+│                          │ INotifyPropertyChanged            │
+├──────────────────────────┼──────────────────────────────────┤
+│  ViewModel Layer                                           │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │ DiagnosticViewModel (协调各层 + 汇总 PASS/FAIL)         │  │
+│  │  ├─ ConnectionViewModel                               │  │
+│  │  ├─ RawStreamViewModel                                │  │
+│  │  ├─ FrameAnalysisViewModel                            │  │
+│  │  └─ PhysicalDataViewModel                             │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+├──────────────────────────┼──────────────────────────────────┤
+│  Diagnostic Engine Layer (核心业务)                        │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │ IDiagnosticPipeline                                   │  │
+│  │  ├─ PhysicalLinkProbe  (ping/arp/tcp)                 │  │
+│  │  ├─ CommandExecutor    (StartCMD/StopCMD/Poll)        │  │
+│  │  ├─ ByteStreamCollector (接收原始字节 + 统计)           │  │
+│  │  ├─ FrameExtractor     (复用 DecoderBase.GetMapping)  │  │
+│  │  ├─ DecoderRunner      (复用 Decoder_76B_StartingBlock)│  │
+│  │  └─ ZeroOffsetManager  (软件清零)                      │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+├──────────────────────────┼──────────────────────────────────┤
+│  Infrastructure Layer (复用生产库)                         │
+│  ┌────────────────────────┴──────────────────────────────┐  │
+│  │ KW.CommunicationLib:  SocketLinker, Communicator      │  │
+│  │                         DecoderBase, DecoderConfig     │  │
+│  │                         Decoder_76B_StartingBlock      │  │
+│  │ KW.Sensor.DataModel:   SensorData_76B_StartingBlock    │  │
+│  │ KW.LoggerService                                                │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+关键设计决策：Diagnostic Engine 不重写解码逻辑，而是直接实例化生产类，确保诊断结果与正式采集完全一致。
+
+2. 项目结构
+text
+
+
+
+KWFS02.DiagnosticTool/
+├── KWFS02.DiagnosticTool.sln
+│
+├── src/
+│   ├── KW.CommunicationLib/              ← 引用生产项目（不复制代码）
+│   ├── KW.Sensor.DataModel/              ← 引用生产项目
+│   │
+│   └── DiagnosticTool/
+│       ├── DiagnosticTool.csproj         (WPF, net8.0-windows)
+│       │
+│       ├── Models/
+│       │   ├── DiagnosticResult.cs       (PASS/FAIL/WARN + 消息 + 建议)
+│       │   ├── FrameValidationResult.cs  (单帧校验结果)
+│       │   ├── PhysicalValueSnapshot.cs  (18 float + 合力/COP)
+│       │   └── DiagnosticReport.cs       (汇总报告)
+│       │
+│       ├── Engine/                       ← 核心诊断引擎
+│       │   ├── IDiagnosticPipeline.cs
+│       │   ├── DiagnosticPipeline.cs
+│       │   ├── PhysicalLinkProbe.cs
+│       │   ├── CommandExecutor.cs
+│       │   ├── ByteStreamCollector.cs
+│       │   ├── FrameExtractor.cs
+│       │   ├── DecoderRunner.cs
+│       │   └── ZeroOffsetManager.cs
+│       │
+│       ├── Adapters/                     ← 适配生产库的薄封装
+│       │   ├── SocketLinkerAdapter.cs    (封装 SocketLinker + 事件)
+│       │   ├── DecoderAdapter.cs         (封装 Decoder_76B_StartingBlock)
+│       │   └── CommunicatorAdapter.cs    (可选：完整复用 Communicator)
+│       │
+│       ├── Services/
+│       │   ├── ReportGenerator.cs        (HTML/PDF 报告)
+│       │   ├── CsvExporter.cs
+│       │   └── RawByteExporter.cs
+│       │
+│       ├── ViewModels/
+│       │   ├── DiagnosticViewModel.cs
+│       │   ├── ConnectionViewModel.cs
+│       │   ├── RawStreamViewModel.cs
+│       │   ├── FrameAnalysisViewModel.cs
+│       │   ├── PhysicalDataViewModel.cs
+│       │   └── ReportViewModel.cs
+│       │
+│       └── Views/
+│           ├── MainWindow.xaml
+│           ├── Controls/
+│           │   ├── DiagnosticTreeView.xaml
+│           │   ├── HexStreamViewer.xaml
+│           │   ├── FrameGrid.xaml
+│           │   └── PhysicalValuePanel.xaml
+│           └── Converters/
+│
+└── tests/
+    └── DiagnosticTool.Tests/
+        ├── FrameExtractorTests.cs        (用已知帧字节测试切分)
+        ├── DecoderRunnerTests.cs         (用已知帧测试解码)
+        └── PhysicalLinkProbeTests.cs
+3. 核心接口设计
+3.1 诊断结果统一模型
+csharp
+
+
+
+// Models/DiagnosticResult.cs
+public enum DiagnosticStatus { Pass, Fail, Warning, Skipped }
+
+public class DiagnosticResult
+{
+    public string LayerName { get; init; }          // "Socket连接" / "帧解析"
+    public DiagnosticStatus Status { get; init; }
+    public string Message { get; init; }            // 可读描述
+    public string? Suggestion { get; init; }        // 修复建议
+    public TimeSpan Duration { get; init; }
+    public Dictionary<string, object>? Metrics { get; init; }  // 速率/丢包率等
+}
+3.2 诊断管线接口
+csharp
+
+
+
+// Engine/IDiagnosticPipeline.cs
+public interface IDiagnosticPipeline : IAsyncDisposable
+{
+    event EventHandler<DiagnosticResult> LayerCompleted;
+    event EventHandler<byte[]> RawBytesReceived;
+    event EventHandler<FrameValidationResult> FrameValidated;
+    event EventHandler<PhysicalValueSnapshot> PhysicalDataDecoded;
+
+    DiagnosticConfig Config { get; }
+
+    Task<IReadOnlyList<DiagnosticResult>> RunFullDiagnosticAsync(CancellationToken ct);
+    Task ConnectAsync(CancellationToken ct);
+    Task DisconnectAsync();
+    Task StartStreamingAsync(CancellationToken ct);
+    Task StopStreamingAsync();
+    Task<SensorData_76B_StartingBlock[]> DecodeFrameAsync(byte[] frame);
+    Task<ZeroOffsetResult> ExecuteZeroOffsetAsync(int durationMs = 200);
+}
+3.3 诊断配置
+csharp
+
+
+
+public class DiagnosticConfig
+{
+    public string DeviceIp { get; set; } = "192.168.1.101";
+    public int DevicePort { get; set; } = 5152;
+    public string LocalIp { get; set; } = "192.168.1.100";
+    public int LocalPort { get; set; } = 8886;
+    public CollectionMode Mode { get; set; } = CollectionMode.Passive;
+    public byte DeviceAddress { get; set; } = 0xAA;
+
+    // 复用生产的设备尺寸参数
+    public float TableWidth { get; set; } = 245.975f;
+    public float TableHeight { get; set; } = 179.92f;
+    public float SensorWidth { get; set; } = 50f;
+    public float SensorHeight { get; set; } = 78f;
+    public float Az0 { get; set; } = -22f;
+}
+4. 关键类设计
+4.1 SocketLinkerAdapter — 连接层适配
+封装生产的 SocketLinker，暴露事件和状态，不修改生产代码：
+
+csharp
+
+
+
+// Adapters/SocketLinkerAdapter.cs
+public class SocketLinkerAdapter : IAsyncDisposable
+{
+    private readonly SocketLinker _linker;
+    private readonly SocketConfig _config;
+
+    public event EventHandler<byte[]>? BytesReceived;
+    public event EventHandler? Disconnected;
+
+    public bool IsConnected => _linker.IsOpen;
+
+    public SocketLinkerAdapter(DiagnosticConfig cfg)
+    {
+        _config = new SocketConfig
+        {
+            RemoteIP = cfg.DeviceIp,
+            RemotePort = cfg.DevicePort,
+            LocalIP = cfg.LocalIp,
+            LocalPort = cfg.LocalPort
+        };
+        _linker = new SocketLinker(_config);
+    }
+
+    public async Task<DiagnosticResult> ConnectAsync(CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            await Task.Run(() => _linker.Open(), ct);
+            sw.Stop();
+            return new DiagnosticResult
+            {
+                LayerName = "Socket连接",
+                Status = DiagnosticStatus.Pass,
+                Message = $"已连接 {_config.RemoteIP}:{_config.RemotePort}",
+                Duration = sw.Elapsed
+            };
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return new DiagnosticResult
+            {
+                LayerName = "Socket连接",
+                Status = DiagnosticStatus.Fail,
+                Message = ex.Message,
+                Suggestion = MapExceptionToSuggestion(ex),
+                Duration = sw.Elapsed
+            };
+        }
+    }
+
+    public void StartReceiving()
+    {
+        _linker.OnDataReceive += (bytes) => BytesReceived?.Invoke(this, bytes);
+    }
+
+    public int Send(byte[] data) => _linker.Send(data, 0, data.Length);
+
+    private static string MapExceptionToSuggestion(Exception ex) => ex switch
+    {
+        SocketException { SocketErrorCode: SocketError.TimedOut }
+            => "连接超时，请检查设备是否上电、IP/端口是否正确、网线是否插好",
+        SocketException { SocketErrorCode: SocketError.ConnectionRefused }
+            => "设备拒绝连接，确认设备端服务已启动且端口匹配",
+        SocketException { SocketErrorCode: SocketError.NetworkUnreachable }
+            => "网络不可达，检查本机网卡 IP 是否与设备同网段",
+        _ => "未知错误，请查看日志"
+    };
+}
+4.2 ByteStreamCollector — 原始字节收集 + 统计
+csharp
+
+
+
+// Engine/ByteStreamCollector.cs
+public class ByteStreamCollector
+{
+    private long _totalBytes;
+    private long _totalPackets;
+    private long _bytesInWindow;
+    private DateTime _windowStart = DateTime.UtcNow;
+    private DateTime _lastReceiveTime = DateTime.UtcNow;
+
+    public event EventHandler<byte[]>? BytesCollected;
+
+    public double BytesPerSecond { get; private set; }
+    public double PacketsPerSecond { get; private set; }
+    public long TotalBytes => _totalBytes;
+    public DateTime LastReceiveTime => _lastReceiveTime;
+
+    public void OnBytesReceived(byte[] bytes)
+    {
+        Interlocked.Add(ref _totalBytes, bytes.Length);
+        Interlocked.Increment(ref _totalPackets);
+        Interlocked.Add(ref _bytesInWindow, bytes.Length);
+        _lastReceiveTime = DateTime.UtcNow;
+
+        if ((_lastReceiveTime - _windowStart).TotalSeconds >= 1)
+        {
+            BytesPerSecond = Interlocked.Exchange(ref _bytesInWindow, 0);
+            PacketsPerSecond = Interlocked.Exchange(ref _totalPackets, 0);
+            _windowStart = _lastReceiveTime;
+        }
+
+        BytesCollected?.Invoke(this, bytes);
+    }
+
+    public bool IsReceiveTimeout(TimeSpan timeout)
+        => (DateTime.UtcNow - _lastReceiveTime) > timeout;
+}
+4.3 FrameExtractor — 帧切分（复用生产逻辑）
+不重写 GetMapping，而是实例化生产的 Decoder_76B_StartingBlock 并调用其 GetMapping：
+
+csharp
+
+
+
+// Engine/FrameExtractor.cs
+public class FrameExtractor
+{
+    private readonly Decoder_76B_StartingBlock _decoder;
+    private readonly List<byte> _buffer = new();
+    private readonly object _lock = new();
+
+    public long TotalFrames { get; private set; }
+    public long ValidFrames { get; private set; }
+    public long InvalidFrames { get; private set; }
+
+    public event EventHandler<FrameValidationResult>? FrameExtracted;
+
+    public FrameExtractor(DiagnosticConfig cfg)
+    {
+        var decoderConfig = new DecoderConfig
+        {
+            TableWidth = cfg.TableWidth,
+            TableHeight = cfg.TableHeight,
+            SensorWidth = cfg.SensorWidth,
+            SensorHeight = cfg.SensorHeight,
+            Az0 = cfg.Az0
+        };
+        _decoder = new Decoder_76B_StartingBlock(decoderConfig);
+    }
+
+    public void Feed(byte[] bytes)
+    {
+        lock (_lock)
+        {
+            _buffer.AddRange(bytes);
+            while (TryExtractFrame(out var frame, out var validation))
+            {
+                TotalFrames++;
+                if (validation.IsValid) ValidFrames++; else InvalidFrames++;
+                FrameExtracted?.Invoke(this, validation);
+                if (validation.IsValid)
+                {
+                    // 交给解码器
+                }
+            }
+        }
+    }
+
+    private bool TryExtractFrame(out byte[] frame, out FrameValidationResult validation)
+    {
+        // 复用 DecoderBase.GetMapping 的核心逻辑
+        // 找 0x48 + 地址，取 76 字节，校验 0x0D 0x0A
+        // ...
+    }
+}
+注意：DecoderBase.GetMapping 是 protected，这里有两种方案：
+
+推荐：在 KW.CommunicationLib 中为 GetMapping 增加 internal 可见性或通过 InternalsVisibleTo 暴露给诊断工具。
+备选：反射调用（不推荐，性能差且脆弱）。
+4.4 DecoderRunner — 物理量解码
+csharp
+
+
+
+// Engine/DecoderRunner.cs
+public class DecoderRunner
+{
+    private readonly Decoder_76B_StartingBlock _decoder;
+
+    public DecoderRunner(DiagnosticConfig cfg)
+    {
+        var dc = new DecoderConfig { /* ... 同 FrameExtractor ... */ };
+        _decoder = new Decoder_76B_StartingBlock(dc);
+    }
+
+    public PhysicalValueSnapshot Decode(byte[] frame)
+    {
+        // 直接调用生产解码器
+        // DecoderBase.Decode 是 protected，需要通过适配器暴露
+        var sensorDataArray = _decoder.DecodeFrame(frame);
+        return PhysicalValueSnapshot.FromSensorData(sensorDataArray);
+    }
+}
+4.5 DiagnosticPipeline — 顶层编排
+csharp
+
+
+
+// Engine/DiagnosticPipeline.cs
+public class DiagnosticPipeline : IDiagnosticPipeline
+{
+    private readonly SocketLinkerAdapter _linker;
+    private readonly ByteStreamCollector _collector;
+    private readonly FrameExtractor _extractor;
+    private readonly DecoderRunner _decoder;
+    private readonly ZeroOffsetManager _zeroManager;
+    private readonly CommandExecutor _commander;
+
+    public DiagnosticPipeline(DiagnosticConfig config)
+    {
+        Config = config;
+        _linker = new SocketLinkerAdapter(config);
+        _collector = new ByteStreamCollector();
+        _extractor = new FrameExtractor(config);
+        _decoder = new DecoderRunner(config);
+        _zeroManager = new ZeroOffsetManager(_decoder);
+        _commander = new CommandExecutor(_linker);
+
+        // 串联事件链
+        _linker.BytesReceived += (_, b) => _collector.OnBytesReceived(b);
+        _collector.BytesCollected += (_, b) =>
+        {
+            RawBytesReceived?.Invoke(this, b);
+            _extractor.Feed(b);
+        };
+        _extractor.FrameExtracted += (_, v) =>
+        {
+            FrameValidated?.Invoke(this, v);
+            if (v.IsValid && v.RawFrame is not null)
+            {
+                var snapshot = _decoder.Decode(v.RawFrame);
+                PhysicalDataDecoded?.Invoke(this, snapshot);
+            }
+        };
+    }
+
+    public async Task<IReadOnlyList<DiagnosticResult>> RunFullDiagnosticAsync(CancellationToken ct)
+    {
+        var results = new List<DiagnosticResult>();
+
+        // 1. 物理链路
+        results.Add(await PhysicalLinkProbe.RunAsync(Config, ct));
+
+        // 2. Socket 连接
+        var connResult = await _linker.ConnectAsync(ct);
+        results.Add(connResult);
+        if (connResult.Status != DiagnosticStatus.Pass) return results;
+
+        // 3. 发送起始命令
+        results.Add(await _commander.SendStartCommandAsync(Config.Mode, ct));
+
+        // 4. 等待数据流入 (3 秒)
+        results.Add(await WaitForDataAsync(TimeSpan.FromSeconds(3), ct));
+
+        // 5. 帧解析统计
+        results.Add(_extractor.GetStatisticsResult());
+
+        // 6. 物理量合理性
+        results.Add(CheckPhysicalValueRange());
+
+        foreach (var r in results) LayerCompleted?.Invoke(this, r);
+        return results;
+    }
+
+    // ...
+}
+4.6 事件链数据流
+text
+
+
+
+SocketLinker.OnDataReceive
+    → SocketLinkerAdapter.BytesReceived
+    → ByteStreamCollector.OnBytesReceived (统计 Bps/Pps)
+    → FrameExtractor.Feed (切帧 + 校验)
+    → DecoderRunner.Decode (18 float → 合力/COP)
+    → PhysicalDataDecoded 事件
+    → ViewModel 入队 (采集线程)
+    → UI 线程消费 (DispatcherTimer)
+    → HexStreamViewer / FrameGrid / PhysicalValuePanel
+5. 生产代码复用清单
+生产类	用途	复用方式
+SocketLinker	TCP 连接与收发	直接实例化
+SocketConfig	连接参数	直接实例化
+Decoder_76B_StartingBlock	帧切分 + 18 float 解析 + 合力计算	直接实例化
+DecoderConfig	解码器配置（台面/传感器尺寸）	直接实例化
+SensorData_76B_StartingBlock	物理量数据结构	直接使用
+GlobalValue.G	重力加速度常量	直接引用
+DecoderBase.VoltageFactor	外部系数	可选（默认恒等）
+需要在生产库中做的最小改动：
+
+将 DecoderBase.GetMapping 和 DecoderBase.Decode 的可见性从 protected 调整为 protected internal，并在 KW.CommunicationLib 的 AssemblyInfo 中添加：
+csharp
+
+
+
+[assembly: InternalsVisibleTo("KWFS02.DiagnosticTool")]
+这样诊断工具可以直接调用，无需反射，且不影响生产代码。
+6. ViewModel 层关键设计
+6.1 线程安全的数据推送
+csharp
+
+
+
+// ViewModels/PhysicalDataViewModel.cs
+public class PhysicalDataViewModel : ObservableObject
+{
+    private readonly ConcurrentQueue<PhysicalValueSnapshot> _queue = new();
+    private readonly DispatcherTimer _uiTimer;
+
+    public PhysicalValueSnapshot Current { get; private set; }
+    public ObservableCollection<PhysicalValueSnapshot> History { get; } = new();
+
+    public PhysicalDataViewModel(IDiagnosticPipeline pipeline)
+    {
+        pipeline.PhysicalDataDecoded += (_, snapshot) =>
+        {
+            _queue.Enqueue(snapshot);   // 采集线程：只入队
+        };
+
+        _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _uiTimer.Tick += (_, _) => FlushQueue();
+        _uiTimer.Start();
+    }
+
+    private void FlushQueue()
+    {
+        while (_queue.TryDequeue(out var snapshot))
+        {
+            Current = snapshot;
+            History.Add(snapshot);
+            if (History.Count > 100) History.RemoveAt(0);
+        }
+        OnPropertyChanged(nameof(Current));
+    }
+}
+6.2 诊断树 ViewModel
+csharp
+
+
+
+// ViewModels/DiagnosticTreeViewModel.cs
+public class DiagnosticNodeViewModel : ObservableObject
+{
+    public string Name { get; init; }
+    public DiagnosticStatus Status { get; set; }
+    public string? Message { get; set; }
+    public ObservableCollection<DiagnosticNodeViewModel> Children { get; } = new();
+}
+树结构对应各层：
+
+text
+
+
+
+▶ KWFS02 诊断
+  ├─ 物理链路 (ping/arp)
+  ├─ Socket 连接
+  ├─ 起始命令
+  ├─ 数据流入
+  ├─ 帧解析 (76B 校验)
+  └─ 物理量 (合力/COP 范围)
+7. 关键时序图
+一键诊断流程
+text
+
+
+
+User                DiagnosticVM        Pipeline         Probe/Socket/Frame
+ │                       │                  │                    │
+ │── 一键诊断 ──────────►│                  │                    │
+ │                       │── RunFull ──────►│                    │
+ │                       │                  │── ping ───────────►│
+ │                       │                  │◄── result ─────────│
+ │                       │                  │── connect ────────►│
+ │                       │                  │◄── connected ──────│
+ │                       │                  │── send 0x48 ──────►│
+ │                       │                  │── wait 3s ────────►│
+ │                       │                  │◄── bytes stream ───│
+ │                       │                  │── extract frames ──►│
+ │                       │                  │── decode ─────────►│
+ │                       │◄── results ──────│                    │
+ │◄── 更新树状态 ────────│                  │                    │
+实时监控流程
+text
+
+
+
+Device           SocketLinker       Collector       Extractor       Decoder       VM
+  │── 76B frame ──►│                  │               │               │            │
+  │                │── BytesReceived ─►│               │               │            │
+  │                │                  │── Feed ───────►│               │            │
+  │                │                  │               │── Decode ─────►│            │
+  │                │                  │               │               │── snapshot │
+  │                │                  │               │               │── enqueue ─►│
+  │                │                  │               │               │            │── UI tick
+  │                │                  │               │               │            │── flush
+  │                │                  │               │               │            │── render
+8. 可测试性设计
+FrameExtractor 和 DecoderRunner 不依赖网络：可直接喂入已知 76B 帧字节做单元测试。
+PhysicalLinkProbe 抽象 IPinger 接口：单元测试可注入 mock。
+IDiagnosticPipeline 接口：ViewModel 层可注入 mock pipeline 测试 UI 逻辑。
+示例测试：
+
+csharp
+
+
+
+[TestMethod]
+public void Decode_KnownFrame_ReturnsExpectedForces()
+{
+    var frame = BuildFrame(0xAA, new float[9] { 1,0,0, 2,0,0, 3,0,0 });
+    var runner = new DecoderRunner(DefaultConfig);
+    var snapshot = runner.Decode(frame);
+
+    Assert.AreEqual(-6f, snapshot.Left.Fx, 0.001);  // -(1+2+3)
+    Assert.AreEqual(0f, snapshot.Left.Fy, 0.001);
+}
+9. 扩展点
+扩展点	设计
+支持新设备型号	IDecoderFactory 根据型号创建对应 DecoderBase 子类
+新诊断层	实现 IDiagnosticLayer 接口，注册到 Pipeline.Layers
+新报告格式	IReportFormatter 接口（HTML / PDF / Markdown）
+批量诊断	BatchDiagnosticOrchestrator 管理多 pipeline 并发

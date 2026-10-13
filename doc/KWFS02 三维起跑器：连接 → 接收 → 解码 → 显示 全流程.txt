@@ -1,0 +1,209 @@
+KWFS02 三维起跑器：连接 → 接收 → 解码 → 显示 全流程
+一、设备配置（数据来源）
+设备模型定义 — KWFS02.cs:11
+
+KWFS02 继承 DeviceModelBase，构造函数里固化了这台设备的关键参数：
+
+参数	值	用途
+TableSizeX / Y	245.975 / 179.92 mm	台面尺寸，用于算 COP / 力矩
+SensorSizeX / Y	50 / 78 mm	传感器间距，用于算力矩
+LinkerConfig	SocketConfig	走以太网（TCP/UDP）
+DecoderClass	Decoder_76B_StartingBlock	指定解码器类型
+Az0	-22	Z 轴方向零点偏移（重力补偿角度）
+关键：DeviceModelBase.GetCommunicator() (DeviceModelBase.cs:349) 把上述参数打包进 DecoderConfig，并创建 new Communicator(LinkerConfig, DecoderConfig)。如果设备勾选了「间接通讯」(IndirectConnect=true)，返回 null —— 副台不单独建通讯器，由主台代收。
+
+二、连接（建链）
+链路由 CaptureSessionService.BuildCommunicatorsFromAppDevices() (CaptureSessionService.cs:408) 构建：
+
+text
+
+
+
+App.Devices (DeviceModelBase 列表)
+   → device.GetCommunicator()  →  List<Communicator>
+   → communicator.DecoderConfig.CollectionMode = App.SyncMode  ← 写入采集模式
+采集模式 (DecoderConfig.cs:99 的 CollectionMode)：
+
+Passive (被动 48)：设备主动推流，主机只收
+Initiative (主动 49)：主机轮询发 0x49 命令，一问一答
+OnlyTrigger (58)：外部触发开始
+CaptureCoordinator.EnterPreviewAsync() (CaptureCoordinator.cs:136) 把通讯器列表交给 DeviceCaptureSession.InitializeAsync，然后 StartPreviewAsync() 调用每个 Communicator.Start()。
+
+Communicator.Start() (Communicator.cs:124) 做三件事：
+
+_Linker = LinkerBase.GetLinker(_LinkerConfig) → 创建 SocketLinker（TCP，默认远程 192.168.1.101:5152，本地 192.168.1.100:8886），_Linker.Open() 建立 socket。
+_Decoder = DecoderBase.GetDecoder(_DecoderConfig) → 反射创建 Decoder_76B_StartingBlock 实例。
+若非 Initiative 模式，发送起始命令 0x48 AA 0D 0A（StartCMD），让设备开始推流。
+启动两个后台 Task：DataCollectTask（收字节）和 DataDecoderTask（解码）。
+三、接收原始字节
+CollectData (Communicator.cs:392) 循环里，KWFS02 走的是 Socket + Passive 分支（Communicator.cs:518）：
+
+csharp
+
+
+
+if (_Linker.Receive(out receive, 1, _Decoder.AdjustByteBlock) > 0)
+{
+    _ByteDataQueue.Enqueue(receive);   // 原始字节入队
+    OnReceiveBytes?.Invoke(receive);    // （可选）原始字节回调
+}
+收到的原始字节被塞进 ConcurrentQueue<byte[]> _ByteDataQueue，等解码线程消费。如果 10 秒没收到数据触发 ReceiveError。
+
+四、解码（核心）
+DecodeData (Communicator.cs:568) 从 _ByteDataQueue 取字节，累积到 tempList，调用 _Decoder.GetMapping(...) 做帧切分。
+
+4.1 帧切分 DecoderBase.GetMapping (DecoderBase.cs:318)
+KWFS02 的帧结构（在 Decoder_76B_StartingBlock 构造里定义）：
+
+StartBit = { 0x48 }
+_DataLength = 76 字节
+EndBit = { 0x0D, 0x0A }
+GetMapping 逻辑：
+
+在 tempList 里找 0x48 开头（KWFS02 的 IsSupportAddress=true，所以还要校验下一字节是设备地址 decodeAddress）。
+取出连续 76 字节，校验最后两字节是 0x0D 0x0A。
+通过校验的完整帧交给 MappingCallback → _Decoder.Decode(dataArray, out data)。
+4.2 字节解析 Decode (DecoderBase.cs:141)
+csharp
+
+
+
+if (array.Length != _DataLength) return false;   // 长度校验
+ParseByteArray(array);                            // 拆字节
+data = GetDigitalData();                          // 转物理量
+return true;
+ParseByteArray (Decoder_76B_StartingBlock.cs:16)：
+
+csharp
+
+
+
+for (int i = 0; i < 72; i++)
+    _DataArray[i / 4][i % 4] = array[i + 2];   // 跳过前2字节(帧头+地址)，取72字节=18个float
+76 字节帧布局：
+
+text
+
+
+
+[0] 0x48        帧头
+[1] 地址        0xAA / 0xAB
+[2..73] 72字节  = 18 个 float (4字节/个，IEEE754 小端)
+[74] 0x0D
+[75] 0x0A
+18 个 float 分成两块：_DataArray[0..8] 是左踏板（A，0xAA），_DataArray[9..17] 是右踏板（B，0xAB）。每块 9 个值 = 3 个传感器 × 3 轴 (Fx, Fy, Fz)。
+
+GetDigitalData (Decoder_76B_StartingBlock.cs:24)：
+
+csharp
+
+
+
+tempDataA.Data[i] = BitConverter.ToSingle(_DataArray[i], 0) * GlobalValue.G;  // G=9.8
+4 字节 → float（原始电压/力值单位）
+乘以 GlobalValue.G (9.8) → 转换为 kgf 或 N（取决于传感器标定，这里统一乘 G）
+左踏板 SenserAddress = 0xAA，右踏板 0xAB
+返回 SensorData_76B_StartingBlock[] { tempDataA, tempDataB }。
+
+4.3 六维力计算 SensorData_76B_StartingBlock (SensorData_76B_StartingBlock.cs:22)
+起跑器只有 3 个传感器（不像力台 4 个），所以重写了合力公式：
+
+csharp
+
+
+
+Fx = -(Data[0] + Data[3] + Data[6])   // 3个传感器的X分量求和
+Fy = -(Data[1] + Data[4] + Data[7])
+Fz = -(Data[2] + Data[5] + Data[8])
+继承自 SensorData_56Bit 的 Mx/My/Mz/COPX/COPY 则用台面尺寸、传感器间距和 Az0=-22 算出力矩和压力中心。
+
+4.4 软件清零 AdjustData (DecoderBase.cs:392)
+MappingCallback (Communicator.cs:626) 在 SetZero_Soft() 后会开启 200ms 窗口，把这段时间的点取平均作为 _ZeroOffsetObj[address]，之后每个点都减去零点偏移：
+
+csharp
+
+
+
+OnDataDecode(_Decoder.AdjustData(dataPoint, _ZeroOffsetObj));
+五、数据上送（采集会话层）
+Communicator.OnDataDecode 回调被 DeviceCaptureSession 订阅 (DeviceCaptureSession.cs:551)：
+
+text
+
+
+
+Communicator.OnDataDecode(SensorData)
+   → DeviceCaptureSession.HandleSensorDataDecoded(sensorData)
+HandleSensorDataDecoded (DeviceCaptureSession.cs:648)：
+
+按传感器地址独立计数 _perAddressPointCount（左 0xAA、右 0xAB 各算各的）。
+根据 FrameRateHz 生成均匀时间戳：Time = perAddressCount / frameRateHz。
+正式采首包触发 FirstSessionDataReceived 事件，记录 TriggeredAtUtc。
+每个点触发 SessionDataReceived 事件 + 通知所有 IDeviceCapturePointListener。
+六、UI 显示（图表）
+TestWorkspaceViewModel.Chart.cs 注册了一个 DeviceCaptureChartPointListener (TestWorkspaceViewModel.Chart.cs:1909)：
+
+csharp
+
+
+
+public void OnSensorData(DeviceCaptureSessionEventArgs eventArgs)
+{
+    _owner.MarkAndEnqueueSensorPoint(eventArgs.Point);  // 高频回调，只入队不碰UI
+}
+注册入口：CaptureSessionService.RegisterPointListener → CaptureCoordinator.RegisterPointListener → DeviceCaptureSession.Register。
+
+入队后由 VM 的定时/UI 线程批量消费，推给 LiveChartPanel.xaml 绘制定时力曲线（Fx/Fy/Fz + COP 轨迹），TestPanel.xaml 则显示实时数值、清零按钮和开始/结束测试控制。
+
+完整数据流图
+text
+
+
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 配置层                                                            │
+│  KWFS02 (DeviceModelBase)                                         │
+│   ├─ SocketConfig (以太网)              DecoderConfig              │
+│   └─ GetCommunicator() ──────────────► new Communicator()         │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ 采集编排层                                                          │
+│  CaptureSessionService.BuildCommunicatorsFromAppDevices()          │
+│   → CaptureCoordinator.EnterPreviewAsync / StartCaptureAsync       │
+│   → DeviceCaptureSession.InitializeAsync + StartPreviewAsync       │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │ Communicator.Start()
+┌──────────────────────────▼───────────────────────────────────────┐
+│ 通讯层 (Communicator)                                             │
+│  SocketLinker.Open()  → TCP 连接设备                               │
+│  发 0x48 AA 0D 0A (StartCMD) → 设备开始推流                        │
+│                                                                   │
+│  DataCollectTask ──收字节──► _ByteDataQueue                       │
+│  DataDecoderTask ──取帧──► GetMapping(找0x48+地址, 76字节, 0D0A)   │
+│                  ──解析──► Decoder_76B_StartingBlock.Decode        │
+│                              ├─ ParseByteArray: 72B→18个float      │
+│                              └─ GetDigitalData: ×G → 2×SensorData  │
+│                  ──清零──► AdjustData (减零点偏移)                  │
+│                  ──上送──► OnDataDecode(SensorData)                │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │ SensorData (Fx/Fy/Fz/Mx/My/Mz/COP)
+┌──────────────────────────▼───────────────────────────────────────┐
+│ 采集会话层                                                          │
+│  DeviceCaptureSession.HandleSensorDataDecoded                      │
+│   ├─ 按地址计数 + 时间戳                                            │
+│   ├─ FirstSessionDataReceived / SessionDataReceived 事件          │
+│   └─ NotifyListeners → IDeviceCapturePointListener.OnSensorData   │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│ UI 层                                                              │
+│  TestWorkspaceViewModel.MarkAndEnqueueSensorPoint (采集线程入队)    │
+│   → UI 线程消费 → LiveChartPanel (实时曲线) / TestPanel (数值)      │
+└──────────────────────────────────────────────────────────────────┘
+关键点总结
+一个起跑器 = 2 个踏板：单帧 76 字节同时包含左(0xAA)、右(0xAB)踏板数据，解码器一次产出 2 个 SensorData。
+每踏板 9 个力值 = 3 个传感器 × 3 轴，合力 Fx/Fy/Fz 是 3 个传感器对应轴之和取反。
+连接方式：以太网 TCP（SocketLinker），被动模式下主机发 0x48 后设备持续推 76 字节帧。
+间接通讯：副台不建通讯器（返回 null），由主台代收数据并按地址区分。
+清零：仅允许在 Previewing 状态执行（正式采 Running 时禁止，避免时间戳计数器重置导致 0.001s 重复点）。
