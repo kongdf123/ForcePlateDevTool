@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 
 using KW.CommunicationLib.Configuration;
@@ -57,7 +58,7 @@ namespace ForcePlateDevTool
         private DiagnosticConfig BuildConfig()
         {
             byte stationAddr = 0xAA;
-            if (byte.TryParse(TxtStationAddr.Text.Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte sa))
+            if (byte.TryParse(TxtStationAddr.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out byte sa))
             {
                 stationAddr = sa;
             }
@@ -240,6 +241,14 @@ namespace ForcePlateDevTool
             catch (Exception ex)
             {
                 Log($"HEX 解析失败: {ex.Message}");
+            }
+        }
+
+        private void CmbPresetCmd_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (CmbPresetCmd.SelectedItem is ComboBoxItem item && item.Tag is string hex)
+            {
+                TxtRawCmd.Text = hex;
             }
         }
 

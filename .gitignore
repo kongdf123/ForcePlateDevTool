@@ -1,0 +1,90 @@
+# =========================
+# .NET / C# Build Outputs
+# =========================
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio cache/options directory
+.vs/
+# Rider
+.idea/
+# VS Code
+.vscode/
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]uild/
+[Bb]uilds/
+
+# Visual Studio build files
+*.Build.CppClean.log
+*.tlog
+*.log
+
+# NuGet Packages
+*.nupkg
+packages/
+*.snupkg
+# NuGet symbol packages
+*.symbols.nupkg
+
+# NuGet cache
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+
+# MSBuild generated files
+_GeneratedFiles/
+*.g.cs
+*.g.i.cs
+*.g.resources
+
+# Publish output
+publish/
+app.publish/
+
+# =========================
+# Test Results
+# =========================
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+*.coverage
+*.coveragexml
+
+# =========================
+# Windows / OS generated
+# =========================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =========================
+# Editor / temp files
+# =========================
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+*.cache
+
+# =========================
+# Project-specific: build log artifacts
+# =========================
+build*.log

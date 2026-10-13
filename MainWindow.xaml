@@ -33,7 +33,7 @@
                         <TextBlock VerticalAlignment="Center" Margin="0,0,4,4">本地端口:</TextBlock>
                         <TextBox x:Name="TxtLocalPort" Text="8886" Width="120" Margin="0,0,0,4"/>
                         <TextBlock VerticalAlignment="Center" Margin="0,0,4,4">站号地址:</TextBlock>
-                        <TextBox x:Name="TxtStationAddr" Text="AA" Width="120" Margin="0,0,0,4"/>
+                        <TextBox x:Name="TxtStationAddr" Text="170" Width="120" Margin="0,0,0,4"/>
                         <TextBlock VerticalAlignment="Center" Margin="0,0,4,4">采集模式:</TextBlock>
                         <ComboBox x:Name="CmbMode" Width="120" Margin="0,0,0,4" SelectedIndex="1">
                             <ComboBoxItem Content="主动获取(49)"/>
@@ -65,6 +65,15 @@
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                             <TextBlock VerticalAlignment="Center" Margin="0,0,4,0">原始指令(HEX):</TextBlock>
+                            <ComboBox x:Name="CmbPresetCmd" Width="150" Margin="0,0,4,0"
+                                      SelectedIndex="0" SelectionChanged="CmbPresetCmd_SelectionChanged"
+                                      ToolTip="选择常用指令自动填入右侧输入框">
+                                <ComboBoxItem Content="开始采集 (48)" Tag="48 AA 0D 0A"/>
+                                <ComboBoxItem Content="停止采集 (43)" Tag="43 AA 0D 0A"/>
+                                <ComboBoxItem Content="主动轮询 (49)" Tag="49 AA 0D 0A"/>
+                                <ComboBoxItem Content="仅外部触发 (58)" Tag="58 AA 0D 0A"/>
+                                <ComboBoxItem Content="停止(长帧)" Tag="48 AA 00 00 00 00 00 00 00 00 00 00 00 0D 0A"/>
+                            </ComboBox>
                             <TextBox x:Name="TxtRawCmd" Width="200" VerticalContentAlignment="Center"/>
                             <Button x:Name="BtnSendRaw" Content="发送" Click="BtnSendRaw_Click" Margin="4,0,0,0" Width="60"/>
                         </StackPanel>
