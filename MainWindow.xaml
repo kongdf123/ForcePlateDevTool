@@ -159,14 +159,8 @@
                              Margin="0,0,0,8"/>
 
                     <TextBlock Grid.Row="2" Grid.Column="0"
-                               Text="站号地址" Style="{StaticResource FieldLabel}"/>
-                    <TextBox Grid.Row="2" Grid.Column="1"
-                             x:Name="TxtStationAddr" Text="170"
-                             Margin="0,0,14,0"/>
-
-                    <TextBlock Grid.Row="2" Grid.Column="2"
                                Text="采集模式" Style="{StaticResource FieldLabel}"/>
-                    <ComboBox Grid.Row="2" Grid.Column="3"
+                    <ComboBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3"
                               x:Name="CmbMode" SelectedIndex="1">
                         <ComboBoxItem Content="主动获取 (49)"/>
                         <ComboBoxItem Content="被动接收 (48)"/>

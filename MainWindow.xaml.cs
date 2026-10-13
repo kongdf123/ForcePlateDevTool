@@ -89,16 +89,6 @@ namespace ForcePlateDevTool
 
         private DiagnosticConfig BuildConfig()
         {
-            byte stationAddr = 0xAA;
-            if (byte.TryParse(
-                    TxtStationAddr.Text.Trim(),
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out byte sa))
-            {
-                stationAddr = sa;
-            }
-
             CollectionMode mode = CmbMode.SelectedIndex switch
             {
                 0 => CollectionMode.Initiative,
@@ -113,7 +103,7 @@ namespace ForcePlateDevTool
                 RemotePort = int.TryParse(TxtRemotePort.Text.Trim(), out int rp) ? rp : 5152,
                 LocalIP = TxtLocalIP.Text.Trim(),
                 LocalPort = int.TryParse(TxtLocalPort.Text.Trim(), out int lp) ? lp : 8886,
-                StationAddress = stationAddr,
+                StationAddress = 0xAA,
                 CollectionMode = mode
             };
         }
