@@ -1,0 +1,131 @@
+name: Release ForcePlateDevTool
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows x64 release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Validate release tag and source branch
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+
+          if ($tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw "Use a stable release tag such as v1.2.0"
+          }
+
+          $version = $tag.Substring(1)
+          $parts = $version.Split('.')
+          $assemblyVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+
+          git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch main"
+          }
+
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag must point to a commit reachable from main"
+          }
+
+          "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_VERSION=$version" | Out-File $env:GITHUB_ENV -Append
+          "ASSEMBLY_VERSION=$assemblyVersion" | Out-File $env:GITHUB_ENV -Append
+          "SHORT_SHA=$($env:GITHUB_SHA.Substring(0, 7))" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Restore solution
+        run: dotnet restore ForcePlateDevTool.sln
+
+      - name: Run tests
+        run: dotnet test ForcePlateDevTool.sln --configuration Release --no-restore
+
+      - name: Publish self-contained Windows x64 app
+        shell: pwsh
+        run: |
+          $publishDir = "artifacts/publish"
+          $project = "src/ForcePlateDevTool/ForcePlateDevTool.csproj"
+          $infoVersion = "$($env:RELEASE_VERSION)+$($env:SHORT_SHA)"
+
+          dotnet publish $project `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output $publishDir `
+            "-p:Version=$env:RELEASE_VERSION" `
+            "-p:AssemblyVersion=$env:ASSEMBLY_VERSION" `
+            "-p:FileVersion=$env:ASSEMBLY_VERSION" `
+            "-p:InformationalVersion=$infoVersion"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Publish failed"
+          }
+
+          @(
+            "Application: ForcePlateDevTool"
+            "Version: $env:RELEASE_VERSION"
+            "InformationalVersion: $infoVersion"
+            "GitTag: $env:RELEASE_TAG"
+            "Commit: $env:GITHUB_SHA"
+            "Runtime: win-x64"
+            "Deployment: self-contained portable ZIP"
+            "BuildTimeUtc: $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
+          ) | Set-Content "$publishDir/VERSION.txt" -Encoding utf8
+
+          @(
+            "ForcePlateDevTool $env:RELEASE_VERSION"
+            ""
+            "Extract the complete ZIP package into a folder."
+            "Run ForcePlateDevTool.exe from that folder."
+            "Keep all packaged files together."
+            ""
+            "See VERSION.txt for build and source information."
+          ) | Set-Content "$publishDir/README.txt" -Encoding utf8
+
+      - name: Create ZIP and SHA-256 checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+
+          $zip = "artifacts/ForcePlateDevTool-v$($env:RELEASE_VERSION)-win-x64.zip"
+          Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          "$hash  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ascii
+
+          "RELEASE_ZIP=$zip" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_CHECKSUM=$zip.sha256" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Publish private GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG `
+            "$env:RELEASE_ZIP" `
+            "$env:RELEASE_CHECKSUM" `
+            --verify-tag `
+            --title "ForcePlateDevTool $env:RELEASE_VERSION" `
+            --generate-notes

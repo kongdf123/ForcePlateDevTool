@@ -54,6 +54,9 @@ namespace ForcePlateDevTool
             InitializeComponent();
             DgFrames.ItemsSource = _frames;
 
+            var versionInfo = AppVersionInfo.Current;
+            Title = $"{Title} — {versionInfo.DisplayVersion}";
+
             _engine.RawBytesReceived += OnRawBytes;
             _engine.FrameDecoded += OnFrameDecoded;
             _engine.LinkStateChanged += OnLinkState;

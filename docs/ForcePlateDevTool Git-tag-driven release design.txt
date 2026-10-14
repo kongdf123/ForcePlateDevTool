@@ -1,0 +1,765 @@
+# ForcePlateDevTool — Git-Tag-Driven Release Specification
+
+**Document Version:** 1.0  
+**Application:** ForcePlateDevTool  
+**Repository:** `kongdf123/ForcePlateDevTool`  
+**Target Platform:** Windows x64  
+**Distribution:** Private GitHub Releases  
+**Installation Method:** Portable ZIP  
+**Build Framework:** .NET 8 / WPF  
+**Versioning Strategy:** Git-tag-driven Semantic Versioning
+
+---
+
+## 1. Purpose and Objectives
+
+This specification defines a standardized, repeatable release process for ForcePlateDevTool.
+
+The objective is to allow developers to publish a new application version by creating and pushing a Git tag. GitHub Actions will automatically validate the release tag, build and test the application, generate a portable ZIP package, calculate its SHA-256 checksum, and publish the artifacts to a private GitHub Release.
+
+The release process should provide:
+
+- Consistent application versioning.
+- Automated compilation and test execution.
+- Reproducible release procedures.
+- A portable Windows x64 distribution package.
+- Version and source-commit traceability.
+- Integrity verification through SHA-256 checksums.
+- Controlled access through a private GitHub repository.
+
+## 2. Scope
+
+### 2.1 Included
+
+- Semantic Versioning using `MAJOR.MINOR.PATCH`.
+- Git tags as the authoritative release version.
+- GitHub Actions release automation.
+- Windows x64 self-contained publishing.
+- Portable ZIP packaging.
+- Automatic release notes generation.
+- SHA-256 checksum generation.
+- Version metadata embedded in the application.
+- Release validation and operational documentation.
+
+### 2.2 Excluded
+
+The initial implementation does not require:
+
+- An MSI or EXE installer.
+- Automatic application updates.
+- A public download website.
+- A separate version-management service.
+- Automatic creation of release tags.
+- Code signing or a formal software supply-chain attestation system.
+
+These capabilities can be introduced later if deployment requirements change.
+
+## 3. Versioning Policy
+
+### 3.1 Version format
+
+Use Semantic Versioning:
+
+`MAJOR.MINOR.PATCH`
+
+Examples:
+
+| Version | Intended use |
+|---|---|
+| `1.0.0` | First stable production release |
+| `1.1.0` | Backward-compatible feature release |
+| `1.1.1` | Backward-compatible bug-fix release |
+| `1.2.0` | Subsequent backward-compatible feature release |
+| `2.0.0` | Release containing breaking compatibility changes |
+
+Version numbers describe the scope and compatibility of a release, not the number of commits or development cycles.
+
+### 3.2 Version increment rules
+
+**MAJOR:** Increment when introducing incompatible changes that require users, configurations, or integrations to adapt.
+
+**MINOR:** Increment when adding backward-compatible functionality.
+
+**PATCH:** Increment when fixing bugs or making backward-compatible corrections.
+
+For example, if `v1.0.0` is the first stable release, the next release can be `v1.2.0` directly. It is not necessary to publish `v1.1.0` first.
+
+### 3.3 Git tag format
+
+Stable releases must use tags in this format:
+
+`vMAJOR.MINOR.PATCH`
+
+Valid examples:
+
+- `v1.0.0`
+- `v1.1.0`
+- `v1.2.0`
+- `v2.0.0`
+
+The initial workflow will accept stable release tags only. Prerelease formats such as `v1.2.0-rc.1` are outside the initial scope and must not be published through this workflow.
+
+### 3.4 Version source of truth
+
+The Git release tag is the authoritative source of the release version.
+
+For a tag named `v1.2.0`, the build should use:
+
+| Metadata | Value |
+|---|---|
+| Git tag | `v1.2.0` |
+| Application/package version | `1.2.0` |
+| Assembly version | `1.2.0.0` |
+| File version | `1.2.0.0` |
+| Informational version | `1.2.0+<short-commit-sha>` |
+
+The commit SHA is included for source traceability. It does not replace the semantic version.
+
+Development builds may use a local default such as `0.1.0-dev`, but a release build must derive its version from the validated Git tag.
+
+## 4. Release Architecture
+
+The release pipeline follows this sequence:
+
+1. A developer completes and merges changes into `main`.
+2. The developer creates an annotated version tag.
+3. The developer pushes the tag to GitHub.
+4. GitHub Actions starts the release workflow.
+5. The workflow validates the tag and its target commit.
+6. The workflow restores dependencies and runs tests.
+7. The workflow publishes a self-contained Windows x64 application.
+8. The workflow generates release metadata and user instructions.
+9. The workflow packages the published output into a ZIP file.
+10. The workflow calculates the ZIP's SHA-256 checksum.
+11. The workflow creates a private GitHub Release and uploads the ZIP and checksum.
+
+A failed validation, build, test, or packaging step must prevent release publication.
+
+## 5. Repository Changes
+
+The following files are required or should be updated.
+
+| File | Change | Purpose |
+|---|---|---|
+| `.github/workflows/dotnet-desktop.yml` | Retain and review | Continuous integration for normal code changes |
+| `.github/workflows/release.yml` | Add | Automated tag-triggered release pipeline |
+| `src/ForcePlateDevTool/ForcePlateDevTool.csproj` | Update | Define development defaults and support version overrides |
+| `src/ForcePlateDevTool/Services/AppVersionInfo.cs` | Add | Read application version metadata at runtime |
+| `docs/RELEASE.md` | Add | Document the release process and distribution procedure |
+
+Existing project configuration must be inspected before adding version properties. Avoid duplicating properties that are already defined.
+
+### 5.1 Project version defaults
+
+The project file should define local development defaults similar to the following:
+
+```xml
+<PropertyGroup>
+  <Version>0.1.0-dev</Version>
+  <AssemblyVersion>0.1.0.0</AssemblyVersion>
+  <FileVersion>0.1.0.0</FileVersion>
+  <InformationalVersion>0.1.0-dev</InformationalVersion>
+</PropertyGroup>
+```
+
+The release workflow must override these properties using values derived from the release tag.
+
+These defaults are not the production release version source.
+
+### 5.2 Runtime version information
+
+Add an `AppVersionInfo` service that reads the executing application's assembly metadata.
+
+It should expose:
+
+- Application informational version.
+- File version.
+- Source commit identifier, when available.
+
+The About or diagnostic-information interface may display these values so developers can identify which build is running.
+
+The displayed version should remain meaningful for both local development builds and published releases.
+
+## 6. GitHub Actions Release Workflow
+
+Create `.github/workflows/release.yml`.
+
+The workflow should:
+
+- Trigger on pushes of tags matching `v*`.
+- Validate that the tag is a stable `MAJOR.MINOR.PATCH` version.
+- Require the tagged commit to be reachable from `main`.
+- Build on a Windows runner.
+- Use the .NET 8 SDK.
+- Restore the solution and run the test suite.
+- Publish the application for `win-x64`.
+- Use self-contained deployment.
+- Embed the release version and source commit.
+- Generate a ZIP package and SHA-256 checksum.
+- Publish a GitHub Release using the repository's `GITHUB_TOKEN`.
+
+### 6.1 Release validation
+
+The workflow must reject tags that do not conform to the stable version format.
+
+It must also verify that the tagged commit is reachable from the intended release branch, assumed to be `main`. If the repository uses another default branch, update the workflow accordingly.
+
+This validation prevents accidental releases from unrelated development branches. It does not replace required code review or branch protection.
+
+### 6.2 Build and test
+
+Before publishing, the workflow must:
+
+1. Restore `ForcePlateDevTool.sln`.
+2. Execute the tests in Release configuration.
+3. Publish the application only after tests succeed.
+
+The workflow should fail immediately if a command returns a nonzero exit code.
+
+### 6.3 Publishing configuration
+
+The intended publishing configuration is:
+
+- Configuration: `Release`
+- Runtime identifier: `win-x64`
+- Deployment: self-contained
+- Output directory: `artifacts/publish`
+
+The self-contained deployment includes the .NET runtime required by the application, so users should not need to install .NET 8 separately.
+
+This does not guarantee compatibility with every Windows version or hardware configuration; the package must still be tested on supported target systems.
+
+### 6.4 Required workflow permissions
+
+The release job should request only the permissions it needs, including:
+
+```yaml
+permissions:
+  contents: write
+```
+
+This permission allows the workflow to create releases and upload release assets.
+
+The repository's Actions settings and branch/tag protection rules must permit the intended workflow to run.
+
+## 7. Release Artifacts
+
+Each successful release must contain the following assets.
+
+### 7.1 Portable ZIP
+
+Naming convention:
+
+`ForcePlateDevTool-v1.2.0-win-x64.zip`
+
+The ZIP must contain the complete published application output, including the executable and its required runtime and dependency files.
+
+Users must extract the ZIP and keep the packaged files together. The application is launched by running `ForcePlateDevTool.exe`.
+
+The ZIP is a portable application package, not a single-file executable or an installer.
+
+### 7.2 Version information file
+
+Include `VERSION.txt` in the package.
+
+It should contain:
+
+- Application name.
+- Semantic version.
+- Informational version.
+- Git tag.
+- Full source commit SHA.
+- Runtime identifier.
+- Deployment model.
+- UTC build timestamp.
+
+This file helps developers and support personnel identify the origin of a deployed build.
+
+### 7.3 User instructions
+
+Include a short `README.txt` with the package explaining how to extract and run the application and where to find version information.
+
+Detailed release and troubleshooting instructions should remain in `docs/RELEASE.md`.
+
+### 7.4 SHA-256 checksum
+
+Generate a checksum file alongside the ZIP:
+
+`ForcePlateDevTool-v1.2.0-win-x64.zip.sha256`
+
+The checksum must be calculated from the final ZIP artifact, not from the publish directory.
+
+Users or support personnel can recalculate the ZIP's SHA-256 hash and compare it with the published value to detect accidental corruption or modification.
+
+A checksum alone does not prove publisher authenticity. Code signing or a trusted signature-verification mechanism would be needed for stronger publisher verification.
+
+## 8. Private GitHub Release and Access Control
+
+Releases must be published to the existing private repository.
+
+Only users with sufficient access to the private repository can download its release assets. The exact access level depends on the repository's permissions and organizational policies.
+
+The release workflow should generate release notes from GitHub's release-note generation capability, subject to repository configuration.
+
+The release must not be made public as part of this design.
+
+## 9. Developer Release Procedure
+
+A developer should publish a stable release using the following process.
+
+### Step 1 — Prepare the release commit
+
+Merge the intended changes into `main`, and ensure that continuous integration passes.
+
+### Step 2 — Update the local repository
+
+```bash
+git switch main
+git pull --ff-only origin main
+```
+
+### Step 3 — Create an annotated tag
+
+For example, to publish version `1.0.0`:
+
+```bash
+git tag -a v1.0.0 -m "ForcePlateDevTool 1.0.0"
+```
+
+Choose the appropriate next version according to the versioning policy.
+
+### Step 4 — Push the tag
+
+```bash
+git push origin v1.0.0
+```
+
+### Step 5 — Monitor the release workflow
+
+Open the repository's GitHub Actions page and verify that the release workflow completes successfully.
+
+### Step 6 — Verify the GitHub Release
+
+Confirm that the release contains:
+
+- The expected version.
+- The portable ZIP.
+- The SHA-256 checksum.
+- Appropriate release notes.
+
+Download the ZIP and test it on a clean Windows x64 machine or virtual machine before distributing it internally.
+
+### Step 7 — Preserve release history
+
+Do not move, overwrite, or reuse a published version tag. If a released build contains a defect, publish a new patch version, such as `v1.0.1`.
+
+## 10. CI and Release Responsibilities
+
+The normal CI workflow and release workflow serve different purposes.
+
+| Workflow | Trigger | Responsibility |
+|---|---|---|
+| Continuous integration | Code pushes and pull requests, according to its configuration | Validate that the solution builds and tests pass |
+| Release | Push of a version tag | Validate the release, build the production package, and publish release assets |
+
+The release workflow must independently execute its required tests. It should not assume that an earlier CI run guarantees that the tagged source has been validated.
+
+The existing CI workflow should be reviewed for consistency, but it does not need to be replaced merely to introduce release automation.
+
+## 11. Acceptance Criteria
+
+The implementation is considered complete when all of the following conditions are satisfied.
+
+### Versioning
+
+- [ ] A stable version tag such as `v1.0.0` is accepted.
+- [ ] Invalid tags are rejected.
+- [ ] The package and assembly metadata reflect the tag version.
+- [ ] The informational version includes the source commit identifier.
+
+### Build and test
+
+- [ ] The release job runs on a Windows runner.
+- [ ] The solution restores successfully.
+- [ ] Release-mode tests pass before publication.
+- [ ] The application publishes successfully for `win-x64`.
+- [ ] Failed tests or publishing steps prevent release creation.
+
+### Packaging
+
+- [ ] The portable ZIP has the prescribed name.
+- [ ] The ZIP contains the complete self-contained publish output.
+- [ ] `VERSION.txt` and `README.txt` are included.
+- [ ] A SHA-256 checksum file is generated.
+- [ ] The ZIP can be extracted and launched on a supported clean Windows x64 environment.
+
+### Distribution
+
+- [ ] The release appears in the private GitHub repository.
+- [ ] Both the ZIP and checksum are attached.
+- [ ] Users without repository access cannot retrieve the private release assets.
+- [ ] A subsequent release can be published with a new tag without modifying previous release history.
+
+## 12. Security and Operational Considerations
+
+- Protect the `main` branch and control who can create or push release tags.
+- Consider restricting release-tag creation to authorized maintainers.
+- Use the minimum permissions necessary for GitHub Actions.
+- For stronger supply-chain security, pin third-party GitHub Actions to reviewed full commit SHAs.
+- Do not store secrets in source code, release metadata, or packaged configuration files.
+- Do not include private device credentials or sensitive operational data in the ZIP.
+- Test the portable package before internal distribution.
+- Retain release assets and tag history according to the company's software-retention policy.
+
+## 13. Implementation Status and Limitations
+
+This document defines the intended release design. It does not, by itself, mean that the workflow has been committed, executed, or validated against the current repository.
+
+Before production use, the implementation must be checked against the actual solution and project files, the existing CI workflow, the repository's default branch, and its GitHub Actions permissions.
+
+The initial release pipeline should be tested with a disposable test tag and a non-production release procedure before the first official version is published.
+
+## 14. Summary
+
+The release model is:
+
+**Git tag → validation → build and test → self-contained Windows x64 publish → portable ZIP → SHA-256 checksum → private GitHub Release.**
+
+For developers, releasing a new version becomes a controlled, repeatable operation: merge approved code, create a correctly formatted tag, push it, and verify the generated release artifacts.
+
+
+Recommended implementation order
+1. Inspect the current .csproj, solution, and CI workflow to avoid conflicting configuration.
+2. Add the release workflow and version metadata service.
+3. Add docs/RELEASE.md and package instructions.
+4. Test a disposable tag in GitHub Actions.
+5. Download and validate the ZIP on a clean Windows x64 environment.
+6. Publish the first official stable version, such as v1.0.0, when the application is ready.
+The specification above is an implementation-ready design, but the repository changes themselves have not been applied or tested as part of this response.
+
+
+## Code Changes
+1. Repository changes
+Based on the project structure established earlier, I recommend adding or updating these files:
+ForcePlateDevTool/
+├── .github/
+│   └── workflows/
+│       ├── dotnet-desktop.yml       # Existing PR/CI workflow
+│       └── release.yml              # New tag-triggered release workflow
+├── src/
+│   └── ForcePlateDevTool/
+│       ├── ForcePlateDevTool.csproj # Add local-build version defaults
+│       └── ...
+├── tests/
+│   └── ForcePlateDevTool.Tests/
+├── docs/
+│   └── RELEASE.md                   # New release instructions
+└── ForcePlateDevTool.sln
+
+
+The release workflow should complement the existing CI workflow, not replace it. Pull requests continue to run tests; only an intentional version tag publishes a release.
+2. Update the project file
+In src/ForcePlateDevTool/ForcePlateDevTool.csproj, add the following properties inside the existing PropertyGroup. If any of these properties already exist, update them rather than duplicating them.
+<PropertyGroup>
+  <!-- Defaults for local development builds.
+       The release workflow overrides these from the Git tag. -->
+  <Version>0.1.0-dev</Version>
+  <AssemblyVersion>0.1.0.0</AssemblyVersion>
+  <FileVersion>0.1.0.0</FileVersion>
+  <InformationalVersion>0.1.0-dev</InformationalVersion>
+</PropertyGroup>
+
+
+These are local-development defaults, not a declaration that your production release is version 0.1.0. The tag passed by CI overrides them during release builds.
+Why use both AssemblyVersion and InformationalVersion?
+- AssemblyVersion is a numeric .NET assembly identity.
+- FileVersion is the numeric Windows executable file version.
+- InformationalVersion can include the commit SHA, which makes it especially useful for support and diagnostics.
+The workflow below passes explicit values for all four properties.
+3. Add .github/workflows/release.yml
+This version is tailored to your current layout, Windows WPF application, .NET 8, automated tests, and portable ZIP distribution. It only accepts stable vMAJOR.MINOR.PATCH tags and requires the tagged commit to be reachable from main.
+
+name: Release ForcePlateDevTool
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows x64 release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Validate release tag and source branch
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+
+          if ($tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw "Use a stable release tag such as v1.2.0"
+          }
+
+          $version = $tag.Substring(1)
+          $parts = $version.Split('.')
+          $assemblyVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+
+          git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch main"
+          }
+
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag must point to a commit reachable from main"
+          }
+
+          "RELEASE_TAG=$tag" |
+            Out-File $env:GITHUB_ENV -Append
+          "RELEASE_VERSION=$version" |
+            Out-File $env:GITHUB_ENV -Append
+          "ASSEMBLY_VERSION=$assemblyVersion" |
+            Out-File $env:GITHUB_ENV -Append
+          "SHORT_SHA=$($env:GITHUB_SHA.Substring(0, 7))" |
+            Out-File $env:GITHUB_ENV -Append
+
+      - name: Restore solution
+        run: dotnet restore ForcePlateDevTool.sln
+
+      - name: Run tests
+        run: dotnet test ForcePlateDevTool.sln --configuration Release --no-restore
+
+      - name: Publish self-contained Windows x64 app
+        shell: pwsh
+        run: |
+          $publishDir = "artifacts/publish"
+          $project = "src/ForcePlateDevTool/ForcePlateDevTool.csproj"
+          $infoVersion = "$($env:RELEASE_VERSION)+$($env:SHORT_SHA)"
+
+          dotnet publish $project `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output $publishDir `
+            "-p:Version=$env:RELEASE_VERSION" `
+            "-p:AssemblyVersion=$env:ASSEMBLY_VERSION" `
+            "-p:FileVersion=$env:ASSEMBLY_VERSION" `
+            "-p:InformationalVersion=$infoVersion"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Publish failed"
+          }
+
+          @(
+            "Application: ForcePlateDevTool"
+            "Version: $env:RELEASE_VERSION"
+            "InformationalVersion: $infoVersion"
+            "GitTag: $env:RELEASE_TAG"
+            "Commit: $env:GITHUB_SHA"
+            "Runtime: win-x64"
+            "Deployment: self-contained portable ZIP"
+            "BuildTimeUtc: $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
+          ) | Set-Content "$publishDir/VERSION.txt" -Encoding utf8
+
+          @(
+            "ForcePlateDevTool $env:RELEASE_VERSION"
+            ""
+            "Extract the complete ZIP package into a folder."
+            "Run ForcePlateDevTool.exe from that folder."
+            "Keep all packaged files together."
+            ""
+            "See VERSION.txt for build and source information."
+          ) | Set-Content "$publishDir/README.txt" -Encoding utf8
+
+      - name: Create ZIP and SHA-256 checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+
+          $zip = "artifacts/ForcePlateDevTool-v$($env:RELEASE_VERSION)-win-x64.zip"
+          Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          "$hash  $(Split-Path $zip -Leaf)" |
+            Set-Content "$zip.sha256" -Encoding ascii
+
+          "RELEASE_ZIP=$zip" |
+            Out-File $env:GITHUB_ENV -Append
+          "RELEASE_CHECKSUM=$zip.sha256" |
+            Out-File $env:GITHUB_ENV -Append
+
+      - name: Publish private GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG `
+            "$env:RELEASE_ZIP" `
+            "$env:RELEASE_CHECKSUM" `
+            --verify-tag `
+            --title "ForcePlateDevTool $env:RELEASE_VERSION" `
+            --generate-notes
+
+
+
+What this workflow produces
+For a tag v1.2.0, it attaches these files to the private GitHub Release:
+- ForcePlateDevTool-v1.2.0-win-x64.zip
+- ForcePlateDevTool-v1.2.0-win-x64.zip.sha256
+Inside the ZIP:
+- ForcePlateDevTool.exe
+- The runtime and dependency files required by the self-contained publish
+- VERSION.txt
+- README.txt
+The ZIP is portable in the sense that users can extract and run it without installing the .NET 8 runtime separately. It is not necessarily a single-file executable; keeping the published files together is intentional.
+Before enabling this workflow: confirm the default branch is named main, the solution and project paths match the repository, and the tests pass on Windows. If your default branch has another name, change the branch validation step accordingly. For a production supply-chain policy, pin third-party GitHub Actions to reviewed full commit SHAs rather than floating major-version tags.
+4. Show the version in the WPF application
+Create a small version helper, for example src/ForcePlateDevTool/Services/AppVersionInfo.cs:
+<CodeBlock language="csharp" editable>
+using System.Reflection;
+
+namespace ForcePlateDevTool.Services;
+public sealed record AppVersionInfo(
+string Version,
+string FileVersion,
+string Commit)
+{
+public static AppVersionInfo Current
+{
+get
+{
+var assembly = Assembly.GetEntryAssembly()
+?? Assembly.GetExecutingAssembly();
+string informational =
+assembly.GetCustomAttribute<
+AssemblyInformationalVersionAttribute>()
+?.InformationalVersion
+?? "Unknown";
+string fileVersion =
+assembly.GetCustomAttribute<
+AssemblyFileVersionAttribute>()
+?.Version
+?? "Unknown";
+// Release builds use versions such as 1.2.0+abc1234.
+string commit = "Unknown";
+int plusIndex = informational.IndexOf('+');
+if (plusIndex >= 0 && plusIndex < informational.Length - 1)
+{
+commit = informational[(plusIndex + 1)..];
+}
+return new AppVersionInfo(
+informational,
+fileVersion,
+commit);
+}
+}
+}
+</CodeBlock>
+Use AppVersionInfo.Current in the About dialog and diagnostics. For example:
+var appVersion = AppVersionInfo.Current;
+
+txtVersion.Text = $"Version: {appVersion.Version}";
+txtFileVersion.Text = $"File version: {appVersion.FileVersion}";
+txtCommit.Text = $"Git commit: {appVersion.Commit}";
+
+
+Replace the control names with those in your actual XAML. A release should display something like 1.2.0+abc1234; local builds may show the fallback version until you configure more informative local build metadata.
+5. Add docs/RELEASE.md
+This documents the process for every developer and release owner.
+<WritingBlock id="62841" variant="document"># ForcePlateDevTool Release Process
+Prerequisites
+- Changes have been merged into main.
+- Required CI checks have passed.
+- The release owner has selected the next Semantic Versioning number.
+- The GitHub repository is private and intended users have repository read access.
+Create a release
+1. Update or merge the changes intended for release.
+2. Pull the latest main and ensure the working tree is clean.
+3. Create an annotated version tag on the intended release commit.
+4. Push the tag to GitHub.
+5. Monitor the Release ForcePlateDevTool workflow.
+6. Confirm the GitHub Release was created and both the ZIP and checksum are attached.
+7. Download the ZIP and test it on a clean Windows machine before announcing the release.
+Example:
+Version rules
+- Patch: bug fixes and small corrections.
+- Minor: backward-compatible features.
+- Major: incompatible changes or a major redesign.
+- Stable releases use vMAJOR.MINOR.PATCH.
+- Never move or reuse a published version tag.
+Distribution
+Share the private GitHub Release URL with authorized users. Users download the ZIP, extract all files into one folder, and run ForcePlateDevTool.exe.
+Troubleshooting
+When reporting an issue, include:
+- Application version and Git commit.
+- Windows version.
+- Force plate model and connection settings.
+- Relevant diagnostic logs and reproduction steps.
+Do not include credentials or secrets in logs.</WritingBlock>
+6. Release a version for the first time
+After merging the changes to main, create a tag for the version you want to release. For example:
+git switch main
+git pull --ff-only origin main
+git tag -a v1.0.0 -m "ForcePlateDevTool 1.0.0"
+git push origin v1.0.0
+
+
+Then:
+1. Open the repository's Actions tab and check the release workflow.
+2. Open Releases and verify the new release exists.
+3. Download the ZIP and extract it to a clean Windows test machine.
+4. Start the application and check the About dialog.
+5. Verify that the version, commit, and VERSION.txt match the tagged release.
+The workflow intentionally creates a release only from a stable version tag. For a failed workflow, fix the issue and publish a new patch version rather than reusing the same tag.
+7. Private distribution and access control
+Because this is internal software:
+- Keep the repository private.
+- Grant repository read access only to intended users.
+- Protect main and restrict who can create release tags.
+- Consider requiring review before release tags are created.
+- Treat a published release as immutable.
+- Keep the ZIP checksum with the release so downloaded artifacts can be checked for accidental corruption.
+One distinction matters: a SHA-256 checksum verifies that the ZIP matches the published checksum; it does not by itself prove who built the ZIP or protect against a compromised release account.
+Implementation checklist
+{@body const releaseTasks = [
+"Add version defaults to the application project",
+"Add .github/workflows/release.yml",
+"Add the AppVersionInfo helper and About UI",
+"Record version and commit in diagnostic logs",
+"Add docs/RELEASE.md",
+"Verify existing CI passes on Windows",
+"Test the release workflow using a test tag before the first production release",
+"Restrict tag creation and verify private release access"
+]}
+{@body const [completed, setCompleted] = DIL.useState([])}
+<box border radius="lg" padding={3} gap={3}>
+<row align="center" justify="between">
+<title size="md">Release readiness</title>
+<text color="secondary" size="sm">{completed.length} of {releaseTasks.length}</text>
+</row>
+<box background="surface-tertiary" radius="full" height="6px" clip>
+<box background="surface-inverted" radius="full" height="6px" width={$DIL1%} />
+</box>
+{#each releaseTasks as task}
+<checkbox key={task} checked={completed.includes(task)} onChange={checked => setCompleted(old => checked ? [...old, task] : old.filter(x => x !== task))}>{task}</checkbox>
+{/each}
+</box>
+One final implementation note: I have provided the workflow and code templates, but have not committed these changes or run the workflow against your repository. Validate the project paths and current build configuration before merging. I recommend testing the release workflow first on a disposable test tag and removing that test release/tag according to your repository's release policy before publishing v1.0.0.
