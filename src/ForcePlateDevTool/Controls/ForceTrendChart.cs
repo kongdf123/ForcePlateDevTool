@@ -120,6 +120,18 @@ public sealed class ForceTrendChart : FrameworkElement
                 new Point(2, y - 7));
         }
 
+        DateTime newest = samples.Count > 0
+            ? samples[^1].Timestamp
+            : DateTime.UtcNow;
+
+        DateTime oldest = samples.Count > 0
+            ? samples[0].Timestamp
+            : newest - VisibleWindow;
+
+        double spanMs = Math.Max(
+            1,
+            (newest - oldest).TotalMilliseconds);
+
         for (int i = 0; i <= 4; i++)
         {
             double fraction = i / 4.0;
@@ -130,19 +142,16 @@ public sealed class ForceTrendChart : FrameworkElement
                 new Point(x, top),
                 new Point(x, top + plotHeight));
 
-            double msAgo =
-                VisibleWindow.TotalMilliseconds * (1.0 - fraction);
+            double msIntoWindow = spanMs * fraction;
 
-            string label = msAgo == 0
-                ? "0 ms"
-                : $"-{msAgo:0} ms";
+            string label = msIntoWindow.ToString("0");
 
             DrawText(
                 dc,
                 label,
                 10,
                 Brushes.Gray,
-                new Point(x - 18, top + plotHeight + 6));
+                new Point(x - 12, top + plotHeight + 6));
         }
 
         dc.DrawLine(
@@ -182,9 +191,6 @@ public sealed class ForceTrendChart : FrameworkElement
 
             return;
         }
-
-        DateTime newest = samples[^1].Timestamp;
-        DateTime oldest = newest - VisibleWindow;
 
         DrawSeries(
             dc, samples, s => s.Fx,
