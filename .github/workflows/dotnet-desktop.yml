@@ -43,3 +43,11 @@ jobs:
           --configuration ${{ matrix.configuration }}
           --no-build
           --logger "console;verbosity=normal"
+
+      - name: Upload CI build (for testing only, not a release)
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForcePlateDevTool-CI-build
+          path: src/ForcePlateDevTool/bin/Release/net8.0-windows/
+          if-no-files-found: error
