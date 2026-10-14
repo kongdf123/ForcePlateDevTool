@@ -1,0 +1,1035 @@
+I reviewed the current ForcePlateDevTool source again. I would implement the changes in small, verifiable stages rather than refactor the entire application at once.
+One important finding: your repository already contains ForcePlateDevTool.Tests, EndpointValidatorTests.cs, and DiagnosticEngineLifecycleTests.cs. We should extend those assets rather than create a duplicate test project. The current CI workflow builds the WPF application in Debug and Release, but does not yet run the test project.
+I’ll lay out the implementation below against the existing class and file names, including the actual changes I recommend. I have not committed these changes or verified a build against your private/vendor KWLib dependencies, so treat the code as an implementation patch to apply and validate, not as a tested release.
+1. P0-B — Fix the configuration lifecycle
+1.1 The current bug
+In MainWindow.xaml.cs, BtnStart_Click currently calls:
+_engine.Configure(BuildConfig());
+var result = await _engine.SendStartCommandAsync();
+
+
+That is the wrong place to configure the engine. BuildConfig() reads the current UI values, but the socket and decoder were created earlier in ConnectAsync().
+For example, an operator could connect to port 5152, change the UI to port 5153, then click 开始采集. The active socket would still use the old endpoint, while DiagnosticEngine.Config would now report the new one. This can also affect which command is generated.
+1.2 Fix BtnStart_Click
+Replace the existing method with:
+
+private async void BtnStart_Click(object sender, RoutedEventArgs e)
+{
+    if (!_engine.IsConnected)
+    {
+        Log("尚未连接设备，请先连接。");
+        SetStage(
+            TxtCommandStageStatus,
+            "未连接",
+            Brushes.OrangeRed);
+        return;
+    }
+
+    BtnStart.IsEnabled = false;
+
+    try
+    {
+        // Do not rebuild configuration here.
+        // The active socket and decoder must use the same configuration
+        // captured when ConnectAsync() initialized the connection.
+        var result = await _engine.SendStartCommandAsync();
+
+        SetStage(
+            TxtCommandStageStatus,
+            result.Success ? "开始指令已提交" : "发送失败",
+            result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
+
+        Log(result.Message);
+    }
+    catch (Exception ex)
+    {
+        Log($"启动采集失败: {ex.Message}");
+        SetStage(
+            TxtCommandStageStatus,
+            "启动失败",
+            Brushes.OrangeRed);
+    }
+    finally
+    {
+        BtnStart.IsEnabled = true;
+    }
+}
+
+
+
+The same principle applies to BtnStop_Click and BtnSendRaw_Click: sending a command should use the existing connection, not silently change its configuration.
+1.3 Lock the configuration controls
+Add this method to MainWindow.xaml.cs:
+
+private void SetConnectionSettingsEnabled(bool enabled)
+{
+    TxtRemoteIP.IsEnabled = enabled;
+    TxtRemotePort.IsEnabled = enabled;
+    TxtLocalIP.IsEnabled = enabled;
+    TxtLocalPort.IsEnabled = enabled;
+    CmbMode.IsEnabled = enabled;
+
+    BtnConnect.IsEnabled = enabled;
+    BtnDisconnect.IsEnabled = !enabled;
+}
+
+
+
+Call it from the existing OnLinkState handler, inside its Dispatcher.InvokeAsync callback:
+
+SetConnectionSettingsEnabled(!e.IsConnected);
+
+
+
+Also call SetConnectionSettingsEnabled(true) during initialization so the initial UI is in the disconnected state.
+One subtlety: IsConnected alone may not represent the entire lifecycle. During connection attempts, the UI should also prevent a second connect attempt. For this first fix, disable the connection inputs while connecting, and re-enable them if connection setup fails.
+1.4 Validate and snapshot configuration before connecting
+In BtnConnect_Click, keep validation before calling BuildConfig(). Once validated, construct a configuration snapshot and pass it to the engine exactly once:
+var config = BuildConfig();
+_engine.Configure(config);
+
+bool ok = await _engine.ConnectAsync();
+
+
+Do not subsequently call Configure until the previous connection has been disconnected.
+For additional protection, I recommend making DiagnosticConfig immutable after construction, or creating a separate immutable ActiveConnectionConfig snapshot. We can do that in a later cleanup; the immediate fix is to stop changing configuration from the Start button.
+Acceptance criteria for P0-B
+- Connect using one endpoint and collection mode.
+- Attempt to edit endpoint/mode settings while connected: the controls are disabled.
+- Click Start and Stop: the active configuration does not change.
+- Disconnect: the controls become editable.
+- Change settings and reconnect: the new socket and decoder use the new settings.
+2. Project structure — organize without breaking vendor dependencies
+The current project has application source files at the repository root, while the test project is nested under ForcePlateDevTool.Tests/. That works, but the test project should be included explicitly in a solution and CI.
+I would eventually aim for:
+ForcePlateDevTool/
+├── ForcePlateDevTool.sln
+├── src/
+│   └── ForcePlateDevTool/
+│       ├── App.xaml
+│       ├── MainWindow.xaml
+│       ├── MainWindow.xaml.cs
+│       ├── Controls/
+│       │   └── ForceTrendChart.cs
+│       ├── Models/
+│       ├── Services/
+│       ├── Protocol/
+│       └── ForcePlateDevTool.csproj
+├── tests/
+│   └── ForcePlateDevTool.Tests/
+│       ├── EndpointValidatorTests.cs
+│       ├── DiagnosticEngineLifecycleTests.cs
+│       └── Protocol/
+├── docs/
+│   ├── protocol.md
+│   └── hardware-smoke-test.md
+└── .github/
+    └── workflows/
+        └── dotnet-desktop.yml
+
+
+However, I would not move the existing application files yet. We have not established exactly how KWLib and any vendor assemblies are supplied to the build. Moving the application project can change relative paths and break references even if the C# code itself is unchanged.
+First change: add a solution file
+From the repository root, run:
+dotnet new sln -n ForcePlateDevTool
+
+dotnet sln ForcePlateDevTool.sln add `
+    ForcePlateDevTool.csproj
+
+dotnet sln ForcePlateDevTool.sln add `
+    ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj
+
+
+This puts the existing app and tests into one solution without moving any source files.
+Then validate:
+dotnet restore ForcePlateDevTool.sln
+
+dotnet build ForcePlateDevTool.sln `
+    --configuration Debug
+
+dotnet build ForcePlateDevTool.sln `
+    --configuration Release
+
+dotnet test ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj `
+    --configuration Release
+
+
+Run these on Windows, where WPF and the project's Windows-specific dependencies are supported.
+Second change: move files incrementally
+After the solution builds reliably, move only application-owned files into src/ForcePlateDevTool/. Move the test project to tests/ForcePlateDevTool.Tests/ at the same time, and update the test project's ProjectReference accordingly.
+Keep KWLib or vendor-supplied files in their existing location until the build dependencies have been mapped. This is a deliberate safety measure, not a permanent architectural limitation.
+3. Real-time chart — implement a small, bounded WPF chart
+For the first version, I recommend two charts, one per pedal, each displaying Fx, Fy, and Fz, plus the latest numeric values. We can implement a lightweight WPF chart control ourselves, avoiding a new chart-library dependency during the initial hardware-diagnostics work.
+The design has four parts:
+1. A simple sample model.
+2. A bounded chart control.
+3. A thread-safe queue between the decoder and UI.
+4. A UI refresh loop that updates the chart independently of packet reception.
+3.1 Add a sensor sample model
+Create Models/ForceSample.cs:
+
+namespace ForcePlateDevTool.Models;
+
+public sealed record ForceSample(
+    DateTime Timestamp,
+    byte SensorAddress,
+    float Fx,
+    float Fy,
+    float Fz);
+
+
+
+This model contains only decoded measurements. It deliberately does not know about UDP, frame parsing, or WPF.
+The current SensorData already exposes SenserAddress, Fx, Fy, and Fz, so we can adapt it in OnFrameDecoded rather than changing the vendor decoder.
+3.2 Add a lightweight chart control
+Create Controls/ForceTrendChart.cs:
+
+using System.Windows;
+using System.Windows.Media;
+using ForcePlateDevTool.Models;
+
+namespace ForcePlateDevTool.Controls;
+
+/// <summary>
+/// A bounded real-time trend chart for one pedal.
+/// AddSample and Clear should be called on the UI thread.
+/// </summary>
+public sealed class ForceTrendChart : FrameworkElement
+{
+    private const int MaxSamples = 1200;
+    private static readonly TimeSpan VisibleWindow =
+        TimeSpan.FromSeconds(10);
+
+    private readonly List<ForceSample> _samples = new();
+
+    private readonly Typeface _typeface =
+        new("Segoe UI");
+
+    public ForceTrendChart()
+    {
+        ClipToBounds = true;
+        MinHeight = 180;
+    }
+
+    public void AddSample(ForceSample sample)
+    {
+        _samples.Add(sample);
+
+        DateTime cutoff = sample.Timestamp - VisibleWindow;
+
+        while (_samples.Count > 0 &&
+               (_samples[0].Timestamp < cutoff ||
+                _samples.Count > MaxSamples))
+        {
+            _samples.RemoveAt(0);
+        }
+
+        InvalidateVisual();
+    }
+
+    public void Clear()
+    {
+        _samples.Clear();
+        InvalidateVisual();
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        base.OnRender(dc);
+
+        double width = ActualWidth;
+        double height = ActualHeight;
+
+        dc.DrawRectangle(
+            Brushes.White,
+            null,
+            new Rect(0, 0, width, height));
+
+        if (width < 100 || height < 80)
+            return;
+
+        const double left = 42;
+        const double right = 12;
+        const double top = 12;
+        const double bottom = 26;
+
+        double plotWidth = width - left - right;
+        double plotHeight = height - top - bottom;
+
+        if (plotWidth <= 0 || plotHeight <= 0)
+            return;
+
+        var gridPen = new Pen(
+            new SolidColorBrush(Color.FromRgb(225, 230, 237)),
+            1);
+
+        for (int i = 0; i <= 4; i++)
+        {
+            double y = top + plotHeight * i / 4.0;
+
+            dc.DrawLine(
+                gridPen,
+                new Point(left, y),
+                new Point(left + plotWidth, y));
+        }
+
+        if (_samples.Count < 2)
+        {
+            DrawText(
+                dc,
+                "Waiting for decoded samples...",
+                12,
+                Brushes.Gray,
+                new Point(left + 8, top + 8));
+
+            return;
+        }
+
+        float min = _samples
+            .SelectMany(s => new[] { s.Fx, s.Fy, s.Fz })
+            .Where(float.IsFinite)
+            .DefaultIfEmpty(-1)
+            .Min();
+
+        float max = _samples
+            .SelectMany(s => new[] { s.Fx, s.Fy, s.Fz })
+            .Where(float.IsFinite)
+            .DefaultIfEmpty(1)
+            .Max();
+
+        // Include zero and avoid a zero-height scale.
+        min = Math.Min(min, 0);
+        max = Math.Max(max, 0);
+
+        if (max - min < 0.001f)
+        {
+            min -= 1;
+            max += 1;
+        }
+
+        double range = max - min;
+        DateTime newest = _samples[^1].Timestamp;
+        DateTime oldest = newest - VisibleWindow;
+
+        DrawText(
+            dc,
+            max.ToString("F1"),
+            10,
+            Brushes.Gray,
+            new Point(2, top - 5));
+
+        DrawText(
+            dc,
+            min.ToString("F1"),
+            10,
+            Brushes.Gray,
+            new Point(2, top + plotHeight - 8));
+
+        DrawText(
+            dc,
+            "10 s",
+            10,
+            Brushes.Gray,
+            new Point(left, top + plotHeight + 5));
+
+        DrawText(
+            dc,
+            "Now",
+            10,
+            Brushes.Gray,
+            new Point(left + plotWidth - 24, top + plotHeight + 5));
+
+        DrawSeries(
+            dc, _samples, s => s.Fx,
+            Color.FromRgb(37, 99, 235),
+            oldest, newest, min, range,
+            left, top, plotWidth, plotHeight);
+
+        DrawSeries(
+            dc, _samples, s => s.Fy,
+            Color.FromRgb(217, 119, 6),
+            oldest, newest, min, range,
+            left, top, plotWidth, plotHeight);
+
+        DrawSeries(
+            dc, _samples, s => s.Fz,
+            Color.FromRgb(5, 150, 105),
+            oldest, newest, min, range,
+            left, top, plotWidth, plotHeight);
+    }
+
+    private static void DrawSeries(
+        DrawingContext dc,
+        IReadOnlyList<ForceSample> samples,
+        Func<ForceSample, float> selector,
+        Color color,
+        DateTime oldest,
+        DateTime newest,
+        float min,
+        double range,
+        double left,
+        double top,
+        double plotWidth,
+        double plotHeight)
+    {
+        var geometry = new StreamGeometry();
+
+        using (var ctx = geometry.Open())
+        {
+            bool started = false;
+
+            foreach (var sample in samples)
+            {
+                float value = selector(sample);
+
+                if (!float.IsFinite(value))
+                {
+                    started = false;
+                    continue;
+                }
+
+                double timeRange =
+                    Math.Max(0.001, (newest - oldest).TotalSeconds);
+
+                double x = left +
+                    (sample.Timestamp - oldest).TotalSeconds /
+                    timeRange * plotWidth;
+
+                double y = top +
+                    (1.0 - (value - min) / range) * plotHeight;
+
+                var point = new Point(x, y);
+
+                if (!started)
+                {
+                    ctx.BeginFigure(point, false, false);
+                    started = true;
+                }
+                else
+                {
+                    ctx.LineTo(point, true, false);
+                }
+            }
+        }
+
+        geometry.Freeze();
+
+        dc.DrawGeometry(
+            null,
+            new Pen(new SolidColorBrush(color), 1.5),
+            geometry);
+    }
+
+    private void DrawText(
+        DrawingContext dc,
+        string text,
+        double size,
+        Brush brush,
+        Point origin)
+    {
+        var formatted = new FormattedText(
+            text,
+            System.Globalization.CultureInfo.CurrentUICulture,
+            FlowDirection.LeftToRight,
+            _typeface,
+            size,
+            brush,
+            VisualTreeHelper.GetDpi(this).PixelsPerDip);
+
+        dc.DrawText(formatted, origin);
+    }
+}
+
+
+
+This is a first-pass chart, not yet a production-validated plotting component. It uses one shared Y-axis for the three force components, so a large Fz range can visually compress Fx and Fy. We should verify the actual sensor ranges and units before deciding whether to use a common scale, separate component scales, or six small plots.
+The control keeps a bounded history, so it will not accumulate samples indefinitely. It also uses WPF drawing rather than creating a new visual element for every measurement.
+3.3 Add the chart tab to MainWindow.xaml
+Add the controls namespace to the root <Window> element:
+xmlns:controls="clr-namespace:ForcePlateDevTool.Controls"
+
+
+Add a new tab to the existing TabControl:
+
+<TabItem Header="实时力值趋势">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <GroupBox Grid.Row="0" Header="左踏板 (0xAA)"
+                  Margin="0,0,0,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="220" />
+                </Grid.ColumnDefinitions>
+
+                <controls:ForceTrendChart
+                    x:Name="LeftForceChart" />
+
+                <StackPanel Grid.Column="1"
+                            Margin="12,0,0,0"
+                            VerticalAlignment="Center">
+                    <TextBlock Text="Fx"
+                               Foreground="#2563EB" />
+                    <TextBlock x:Name="TxtLeftFx"
+                               Text="—"
+                               FontSize="20"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,8" />
+
+                    <TextBlock Text="Fy"
+                               Foreground="#D97706" />
+                    <TextBlock x:Name="TxtLeftFy"
+                               Text="—"
+                               FontSize="20"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,8" />
+
+                    <TextBlock Text="Fz"
+                               Foreground="#059669" />
+                    <TextBlock x:Name="TxtLeftFz"
+                               Text="—"
+                               FontSize="20"
+                               FontWeight="SemiBold" />
+                </StackPanel>
+            </Grid>
+        </GroupBox>
+
+        <GroupBox Grid.Row="1" Header="右踏板 (0xAB)"
+                  Margin="0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="220" />
+                </Grid.ColumnDefinitions>
+
+                <controls:ForceTrendChart
+                    x:Name="RightForceChart" />
+
+                <StackPanel Grid.Column="1"
+                            Margin="12,0,0,0"
+                            VerticalAlignment="Center">
+                    <TextBlock Text="Fx"
+                               Foreground="#2563EB" />
+                    <TextBlock x:Name="TxtRightFx"
+                               Text="—"
+                               FontSize="20"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,8" />
+
+                    <TextBlock Text="Fy"
+                               Foreground="#D97706" />
+                    <TextBlock x:Name="TxtRightFy"
+                               Text="—"
+                               FontSize="20"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,8" />
+
+                    <TextBlock Text="Fz"
+                               Foreground="#059669" />
+                    <TextBlock x:Name="TxtRightFz"
+                               Text="—"
+                               FontSize="20"
+                               FontWeight="SemiBold" />
+                </StackPanel>
+            </Grid>
+        </GroupBox>
+    </Grid>
+</TabItem>
+
+
+
+These are the six current-value fields, with the trend charts beside them. The displayed units should be added only after we verify the decoder's conversion factors and the device's unit convention.
+3.4 Keep the decoder independent from WPF rendering
+The current OnFrameDecoded handler already iterates over decoded SensorData. We should add samples to a thread-safe queue there and let the UI timer consume them.
+Add these fields to MainWindow.xaml.cs:
+using System.Collections.Concurrent;
+
+
+Then, inside MainWindow:
+private readonly ConcurrentQueue<ForceSample> _pendingForceSamples = new();
+
+private long _lastDecodedTicks;
+private const int MaxPendingForceSamples = 5000;
+private long _pendingForceSampleCount;
+
+
+The count lets us keep the queue bounded. For this diagnostic tool, dropping the oldest display samples under heavy UI load is preferable to allowing memory to grow without limit. We must still count the dropped samples so overload is visible.
+For clarity, I would use a small queue wrapper rather than a bare ConcurrentQueue in the final implementation, so that its capacity and drop counter are updated atomically. The essential enqueue operation is:
+_pendingForceSamples.Enqueue(new ForceSample(
+    e.Timestamp,
+    sd.SenserAddress,
+    sd.Fx,
+    sd.Fy,
+    sd.Fz));
+
+
+Place this inside the existing loop in OnFrameDecoded, after confirming that obj is SensorData sd. Do not invoke chart rendering directly from that handler: it may be running on the receive worker thread.
+Next, add this method to MainWindow.xaml.cs:
+
+private void FlushPendingForceSamples()
+{
+    int processed = 0;
+    const int MaxSamplesPerTick = 1000;
+
+    while (processed < MaxSamplesPerTick &&
+           _pendingForceSamples.TryDequeue(out var sample))
+    {
+        processed++;
+
+        if (sample.SensorAddress == 0xAA)
+        {
+            LeftForceChart.AddSample(sample);
+
+            TxtLeftFx.Text = sample.Fx.ToString("F3", CultureInfo.InvariantCulture);
+            TxtLeftFy.Text = sample.Fy.ToString("F3", CultureInfo.InvariantCulture);
+            TxtLeftFz.Text = sample.Fz.ToString("F3", CultureInfo.InvariantCulture);
+        }
+        else if (sample.SensorAddress == 0xAB)
+        {
+            RightForceChart.AddSample(sample);
+
+            TxtRightFx.Text = sample.Fx.ToString("F3", CultureInfo.InvariantCulture);
+            TxtRightFy.Text = sample.Fy.ToString("F3", CultureInfo.InvariantCulture);
+            TxtRightFz.Text = sample.Fz.ToString("F3", CultureInfo.InvariantCulture);
+        }
+
+        Interlocked.Exchange(
+            ref _lastDecodedTicks,
+            sample.Timestamp.Ticks);
+    }
+}
+
+
+
+Then call FlushPendingForceSamples() from the existing DispatcherTimer tick:
+_rawFlushTimer.Tick += (_, _) =>
+{
+    FlushRawBuffer();
+    FlushPendingFrames();
+    FlushPendingForceSamples();
+};
+
+
+Your existing timer runs every 100 ms, so the initial display update rate will be around 10 Hz. That's a reasonable first implementation. We can increase the UI refresh rate to around 20–30 Hz after measuring the actual incoming packet rate and CPU usage.
+Important: this basic queue sample is not yet bounded. Before using the chart under sustained high-rate acquisition, wrap it in a bounded queue or ring buffer and count any dropped samples. The chart itself is bounded, but the pending queue must be bounded too.
+3.5 Fix the frame counter while touching OnFrameDecoded
+Currently _frameCount is incremented before checking whether e.Decoded is null. Change the order:
+if (e.Decoded == null)
+    return;
+
+long frameSeq = Interlocked.Increment(ref _frameCount);
+
+
+This avoids counting a null decoded payload as a valid frame. Later, we should distinguish a successfully decoded frame from a frame that contains valid sensor samples, because those are not necessarily identical.
+3.6 Make the pending queue bounded
+Use this helper instead of the bare ConcurrentQueue<ForceSample> from the previous example.
+Create Services/BoundedQueue.cs:
+
+namespace ForcePlateDevTool.Services;
+
+public sealed class BoundedQueue<T>
+{
+    private readonly object _gate = new();
+    private readonly Queue<T> _queue = new();
+    private readonly int _capacity;
+    private long _droppedCount;
+
+    public BoundedQueue(int capacity)
+    {
+        if (capacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+
+        _capacity = capacity;
+    }
+
+    public long DroppedCount => Interlocked.Read(ref _droppedCount);
+
+    public void Enqueue(T item)
+    {
+        lock (_gate)
+        {
+            if (_queue.Count >= _capacity)
+            {
+                _queue.Dequeue();
+                Interlocked.Increment(ref _droppedCount);
+            }
+
+            _queue.Enqueue(item);
+        }
+    }
+
+    public bool TryDequeue(out T item)
+    {
+        lock (_gate)
+        {
+            if (_queue.Count == 0)
+            {
+                item = default!;
+                return false;
+            }
+
+            item = _queue.Dequeue();
+            return true;
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            _queue.Clear();
+        }
+    }
+}
+
+
+
+Then change the MainWindow field to:
+private readonly BoundedQueue<ForceSample> _pendingForceSamples =
+    new(capacity: 5000);
+
+
+The existing enqueue/dequeue calls can keep the same names. This gives us a hard upper bound on pending samples and a DroppedCount we can expose in the UI.
+For a diagnostic application, I would display a nonzero dropped-sample count prominently. Otherwise, an overloaded UI could show a smooth-looking chart while silently skipping measurements.
+4. Structured diagnostics — stop counting errors from log text
+The current code increments _errorCount when log strings contain phrases such as "无效数据" or "解码失败". This is fragile: changing a message or adding a different message can change the count without changing the actual diagnostic outcome.
+Instead, count events at the point where they occur in Services/DiagnosticEngine.cs.
+4.1 Add a statistics model
+Create Models/DiagnosticStatistics.cs:
+
+namespace ForcePlateDevTool.Models;
+
+public sealed record DiagnosticStatistics(
+    long ReceivedDatagrams,
+    long ReceivedBytes,
+    long DecodedFrames,
+    long InvalidDataEvents,
+    long DecodeFailures,
+    long DecodeExceptions,
+    DateTime? LastReceiveTime,
+    DateTime? LastDecodedTime);
+
+
+
+4.2 Track counters inside DiagnosticEngine
+Add fields:
+private long _receivedDatagrams;
+private long _receivedBytes;
+private long _decodedFrames;
+private long _invalidDataEvents;
+private long _decodeFailures;
+private long _decodeExceptions;
+private long _lastReceiveTicks;
+private long _lastDecodedTicks;
+
+
+Add a snapshot property:
+public DiagnosticStatistics Statistics => new(
+    Interlocked.Read(ref _receivedDatagrams),
+    Interlocked.Read(ref _receivedBytes),
+    Interlocked.Read(ref _decodedFrames),
+    Interlocked.Read(ref _invalidDataEvents),
+    Interlocked.Read(ref _decodeFailures),
+    Interlocked.Read(ref _decodeExceptions),
+    ToNullableDateTime(Interlocked.Read(ref _lastReceiveTicks)),
+    ToNullableDateTime(Interlocked.Read(ref _lastDecodedTicks)));
+
+private static DateTime? ToNullableDateTime(long ticks) =>
+    ticks > 0 ? new DateTime(ticks) : null;
+
+
+Update the counters in the actual receive/decode path.
+In ReceiveLoop, inside the existing if (n > 0 && data != null && data.Length > 0) block:
+Interlocked.Increment(ref _receivedDatagrams);
+Interlocked.Add(ref _receivedBytes, n);
+Interlocked.Exchange(ref _lastReceiveTicks, DateTime.Now.Ticks);
+
+
+In the invalid-data callback inside ProcessBytes:
+if (invalidBytes.Length > 0)
+{
+    Interlocked.Increment(ref _invalidDataEvents);
+
+    // Keep the existing detailed log message here.
+}
+
+
+In DecodeFrame, increment _decodeFailures when Decode(...) returns false, and increment _decodeExceptions in the catch block.
+Only increment _decodedFrames when Decode(...) succeeds, and update _lastDecodedTicks using the frame timestamp. This gives each counter a defined meaning:
+Counter	Meaning
+Received datagrams	Nonempty datagrams returned by the socket
+Received bytes	Bytes in those datagrams
+Decoded frames	Frames accepted by the decoder
+Invalid data events	Invocations of the decoder's invalid-byte callback containing data
+Decode failures	Decoder returned false
+Decode exceptions	Decoder threw an exception
+These counters are not interchangeable. For example, one invalid-data callback may contain many invalid bytes, so InvalidDataEvents is deliberately not called InvalidFrameCount.
+Thread-safety note: a statistics snapshot can capture counters between two related updates. That's acceptable for a monitoring UI; it is not a transactional record for auditing. If we later need exact diagnostic reports, we should record structured events in a single ordered event stream.
+4.3 Update the UI from the snapshot
+The UI refresh loop can read _engine.Statistics every tick and update the displayed counts and last-receive timestamp.
+Remove the string-matching counter logic from OnLogMessage. Keep that handler responsible for writing human-readable logs only.
+For stale-data detection, use the last decoded timestamp, not merely the last socket receive timestamp. That way, receiving malformed bytes won't make the sensor-data display appear healthy.
+For example:
+var stats = _engine.Statistics;
+
+bool hasDecodedData = stats.LastDecodedTime.HasValue;
+bool isStale = !hasDecodedData ||
+    DateTime.Now - stats.LastDecodedTime!.Value >
+    TimeSpan.FromSeconds(2);
+
+
+Two seconds is a starting threshold, not a protocol guarantee. Make it configurable after confirming the device's normal reporting interval.
+When data becomes stale:
+- Keep the last values visible, but mark them as stale.
+- Do not replace missing data with zero.
+- When no valid data has ever arrived, display —.
+- Distinguish UDP connected, receiving bytes, and valid sensor data as separate states.
+5. Improve the receive-loop lifecycle
+There is another small issue worth fixing while we are working on the connection lifecycle.
+In DiagnosticEngine.StartReceiveLoop(), the current behavior is:
+if (_receiveTask is { IsCompleted: false })
+{
+    LogMessage?.Invoke(this, "接收循环已在运行，无需重复启动");
+    return false;
+}
+
+
+Returning false means “already running” and “failed to start” are indistinguishable to callers. The UI may therefore report an error when reception is actually active.
+For the current API, I would make starting an already-running receive loop idempotent:
+if (_receiveTask is { IsCompleted: false })
+{
+    LogMessage?.Invoke(this, "接收循环已在运行，无需重复启动");
+    return true;
+}
+
+
+Then update the existing lifecycle test StartReceiveLoop_Twice_SecondReturnsFalse to expect true for the second call. The contract becomes: true means the receive loop is active or was successfully started.
+I would also prevent configuration changes while the socket or receive loop is active. In DiagnosticEngine.Configure:
+public void Configure(DiagnosticConfig config)
+{
+    ArgumentNullException.ThrowIfNull(config);
+
+    if (IsConnected)
+    {
+        throw new InvalidOperationException(
+            "Cannot change configuration while connected. Disconnect first.");
+    }
+
+    Config = config;
+}
+
+
+For stronger protection, change the properties of DiagnosticConfig from set to init, so callers cannot mutate the same configuration object after passing it into the engine:
+public sealed record DiagnosticConfig
+{
+    public string RemoteIP { get; init; } = "192.168.1.25";
+    public int RemotePort { get; init; } = 5152;
+    public string LocalIP { get; init; } = "192.168.1.100";
+    public int LocalPort { get; init; } = 8886;
+
+    public byte StationAddress { get; init; } = 0xAA;
+    public CollectionMode CollectionMode { get; init; } =
+        CollectionMode.Passive;
+
+    public float TableWidth { get; init; }
+    public float TableHeight { get; init; }
+    public float SensorWidth { get; init; }
+    public float SensorHeight { get; init; }
+    public float Az0 { get; init; }
+}
+
+
+This preserves object-initializer construction while making the configuration immutable after creation. Before applying it, search the entire project for assignments to Config properties to confirm no existing code relies on mutating them.
+6. Tests — extend what you already have
+Your existing tests cover endpoint validation and several connection/receive-loop lifecycle cases. I would extend them in the following order.
+6.1 Test the bounded queue
+Create ForcePlateDevTool.Tests/BoundedQueueTests.cs:
+
+using ForcePlateDevTool.Services;
+
+namespace ForcePlateDevTool.Tests;
+
+public class BoundedQueueTests
+{
+    [Fact]
+    public void Enqueue_WhenFull_DropsOldestItem()
+    {
+        var queue = new BoundedQueue<int>(capacity: 2);
+
+        queue.Enqueue(1);
+        queue.Enqueue(2);
+        queue.Enqueue(3);
+
+        Assert.Equal(1, queue.DroppedCount);
+
+        Assert.True(queue.TryDequeue(out int first));
+        Assert.Equal(2, first);
+
+        Assert.True(queue.TryDequeue(out int second));
+        Assert.Equal(3, second);
+
+        Assert.False(queue.TryDequeue(out _));
+    }
+
+    [Fact]
+    public void Clear_RemovesQueuedItems()
+    {
+        var queue = new BoundedQueue<int>(capacity: 2);
+
+        queue.Enqueue(1);
+        queue.Enqueue(2);
+        queue.Clear();
+
+        Assert.False(queue.TryDequeue(out _));
+    }
+
+    [Fact]
+    public void Constructor_RejectsInvalidCapacity()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new BoundedQueue<int>(0));
+    }
+}
+
+
+
+These tests are independent of the physical force plate and validate the buffer behavior that protects the UI from overload.
+6.2 Add lifecycle regression tests
+Keep the existing DiagnosticEngineLifecycleTests.cs, but add cases for:
+- Calling Configure while connected must throw.
+- Calling StartReceiveLoop twice leaves only one active loop.
+- Stop → restart → disconnect completes without an orphan receive task.
+- Repeated connect/disconnect does not leave a socket bound to a previous port.
+- Failed connection setup leaves the engine in a disconnected state and permits another attempt.
+For the localhost socket tests, use distinct ports or dynamically allocated test ports to avoid collisions when tests run in parallel. The existing hard-coded localhost ports could collide with another process or another test run.
+6.3 Test the data pipeline without hardware
+The most important next tests should validate the chart input and decoder output.
+- Verify a decoded sample with address 0xAA updates the left-pedal series.
+- Verify a decoded sample with address 0xAB updates the right-pedal series.
+- Verify a non-finite sample (NaN or infinity) does not break chart rendering.
+- Verify the chart never retains more than its configured sample limit.
+- Verify an empty queue produces no fabricated zero readings.
+The decoder integration tests should use real captured packets from the production decoder or a verified packet fixture. We should not invent a “valid 76-byte frame” and treat it as ground truth without checking the actual decoder implementation.
+7. CI — build the solution and run tests
+After creating ForcePlateDevTool.sln, update .github/workflows/dotnet-desktop.yml so CI verifies the test project as well as the application.
+A suitable workflow is:
+
+name: ForcePlateDevTool CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore solution
+        run: dotnet restore ForcePlateDevTool.sln
+
+      - name: Build solution
+        run: >
+          dotnet build ForcePlateDevTool.sln
+          --configuration ${{ matrix.configuration }}
+          --no-restore
+
+      - name: Run tests
+        run: >
+          dotnet test ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj
+          --configuration ${{ matrix.configuration }}
+          --no-build
+          --logger "console;verbosity=normal"
+
+      - name: Upload Release artifact
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForcePlateDevTool-Release
+          path: bin/Release/net8.0-windows/
+          if-no-files-found: error
+
+
+
+This assumes the solution includes both the app and test projects and that the test project references the app. If we later move the application project into src/, update the workflow artifact path accordingly.
+Before merging, confirm the build can resolve all KWLib/vendor dependencies on the GitHub runner. If those dependencies exist only on a developer's machine, CI will need a reproducible way to obtain them; the workflow should not be considered healthy until the build and test steps actually pass.
+8. Recommended order of implementation
+I would not merge all of the changes in one large commit. Use small changesets so a regression can be isolated quickly.
+P0-B
+
+Configuration lifecycle
+Remove reconfiguration from Start; disable endpoint controls while connected; protect the engine from live reconfiguration.
+Verify: connect, start, stop, disconnect, change settings, reconnect.
+
+
+
+P1.1
+
+Solution and tests
+Add the solution file, keep the current folder locations initially, extend tests, and run them in CI.
+Verify: Debug and Release build; all tests pass.
+
+
+
+P1.2
+
+Structured diagnostics and chart data
+Add the sensor sample model, structured counters, bounded queue, and stale-data detection.
+Verify: receive/decode counters reflect actual engine events, not log text.
+
+
+
+P1.3
+
+Real-time chart
+Add left/right trends and numeric readings; throttle UI updates and expose dropped display samples.
+Verify: chart updates under load without blocking packet reception.
+
+
+
+P1.4
+
+Restructure directories
+Move app code under src/ and tests under tests/ only after the solution and CI are stable.
+Verify: no vendor-reference regressions after file moves.
+
+
+
+9. What I would verify on the physical device
+Before calling this complete, run a hardware smoke test with the actual KWFS02 device.
+Test	Expected result
+Ping succeeds, UDP connection succeeds	Socket opens and data reception starts
+Ping fails, UDP may still work	The tool continues attempting UDP diagnostics
+Device sends valid data for both pedals	Correct 0xAA/0xAB readings appear in their respective charts
+Device sends malformed data	Error counters increase; invalid data does not become a force reading
+Device stops sending	Last values remain visible but become stale
+UI updates slowly under load	Receive loop continues independently; dropped chart samples are counted
+Disconnect and reconnect	No orphan receive task, stale socket, or old configuration
+Close the application during reception	Shutdown completes without hanging
+Two final engineering cautions:
+- The chart code above is a starting implementation. It has not been compiled or benchmarked against your exact WPF project and vendor dependencies.
+- The force units, axis signs, and frame-to-sample mapping must be confirmed against the production decoder. In particular, verify whether one decoded frame contains one pedal or both pedals before interpreting frame counts and chart timestamps.
+My strongest recommendation is to implement P0-B first, then the solution/CI improvements, and then the chart pipeline. The chart is valuable, but its readings are only trustworthy if the connection lifecycle, decoding, and measurement semantics are correct.

@@ -24,7 +24,29 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
 
     private bool _disposed;
 
+    private long _receivedDatagrams;
+    private long _receivedBytes;
+    private long _decodedFrames;
+    private long _invalidDataEvents;
+    private long _decodeFailures;
+    private long _decodeExceptions;
+    private long _lastReceiveTicks;
+    private long _lastDecodedTicks;
+
     public DiagnosticConfig Config { get; private set; } = new();
+
+    public DiagnosticStatistics Statistics => new(
+        Interlocked.Read(ref _receivedDatagrams),
+        Interlocked.Read(ref _receivedBytes),
+        Interlocked.Read(ref _decodedFrames),
+        Interlocked.Read(ref _invalidDataEvents),
+        Interlocked.Read(ref _decodeFailures),
+        Interlocked.Read(ref _decodeExceptions),
+        ToNullableDateTime(Interlocked.Read(ref _lastReceiveTicks)),
+        ToNullableDateTime(Interlocked.Read(ref _lastDecodedTicks)));
+
+    private static DateTime? ToNullableDateTime(long ticks) =>
+        ticks > 0 ? new DateTime(ticks) : null;
 
     public event EventHandler<RawBytesEventArgs>? RawBytesReceived;
     public event EventHandler<FrameDecodedEventArgs>? FrameDecoded;
@@ -37,6 +59,14 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
 
     public void Configure(DiagnosticConfig config)
     {
+        ArgumentNullException.ThrowIfNull(config);
+
+        if (IsConnected)
+        {
+            throw new InvalidOperationException(
+                "Cannot change configuration while connected. Disconnect first.");
+        }
+
         Config = config;
     }
 
@@ -167,7 +197,7 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
             if (_receiveTask is { IsCompleted: false })
             {
                 LogMessage?.Invoke(this, "接收循环已在运行，无需重复启动");
-                return false;
+                return true;
             }
 
             _cts?.Dispose();
@@ -231,6 +261,10 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
                 int n = _linker.Receive(out byte[] data, 100);
                 if (n > 0 && data != null && data.Length > 0)
                 {
+                    Interlocked.Increment(ref _receivedDatagrams);
+                    Interlocked.Add(ref _receivedBytes, n);
+                    Interlocked.Exchange(ref _lastReceiveTicks, DateTime.Now.Ticks);
+
                     var timestamp = DateTime.Now;
                     RawBytesReceived?.Invoke(this, new RawBytesEventArgs(data, timestamp));
                     ProcessBytes(data, timestamp);
@@ -263,6 +297,8 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
             {
                 if (invalidBytes.Length > 0)
                 {
+                    Interlocked.Increment(ref _invalidDataEvents);
+
                     string snippet = BitConverter.ToString(invalidBytes).Replace("-", " ");
                     if (snippet.Length > 60)
                         snippet = snippet.Substring(0, 60);
@@ -288,9 +324,13 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
             bool ok = _decoder.Decode(frame, out SensorData[] data);
             if (!ok)
             {
+                Interlocked.Increment(ref _decodeFailures);
                 LogMessage?.Invoke(this, $"解码失败 (长度={frame.Length}): {BitConverter.ToString(frame).Replace("-", " ")}");
                 return;
             }
+
+            Interlocked.Increment(ref _decodedFrames);
+            Interlocked.Exchange(ref _lastDecodedTicks, timestamp.Ticks);
 
             var list = new List<object>();
             if (data != null)
@@ -304,6 +344,7 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
         }
         catch (Exception ex)
         {
+            Interlocked.Increment(ref _decodeExceptions);
             LogMessage?.Invoke(this, $"解码异常: {ex}");
         }
     }

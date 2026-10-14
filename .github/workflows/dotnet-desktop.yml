@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  build-and-test:
     runs-on: windows-latest
 
     strategy:
@@ -28,19 +28,26 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Restore
-        run: dotnet restore ForcePlateDevTool.csproj
+      - name: Restore solution
+        run: dotnet restore ForcePlateDevTool.sln
 
-      - name: Build
+      - name: Build solution
         run: >
-          dotnet build ForcePlateDevTool.csproj
+          dotnet build ForcePlateDevTool.sln
           --configuration ${{ matrix.configuration }}
           --no-restore
 
-      - name: Upload build output
+      - name: Run tests
+        run: >
+          dotnet test tests/ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj
+          --configuration ${{ matrix.configuration }}
+          --no-build
+          --logger "console;verbosity=normal"
+
+      - name: Upload Release artifact
         if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
           name: ForcePlateDevTool-Release
-          path: bin/Release/net8.0-windows/
+          path: src/ForcePlateDevTool/bin/Release/net8.0-windows/
           if-no-files-found: error

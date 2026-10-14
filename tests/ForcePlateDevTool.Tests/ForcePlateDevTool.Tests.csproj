@@ -20,7 +20,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\ForcePlateDevTool.csproj" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ForcePlateDevTool\ForcePlateDevTool.csproj" />
   </ItemGroup>
 
 </Project>

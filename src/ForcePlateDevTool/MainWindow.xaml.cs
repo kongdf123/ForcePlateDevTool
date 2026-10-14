@@ -38,12 +38,15 @@ namespace ForcePlateDevTool
         private readonly List<FrameRow> _pendingFrames = new();
         private readonly object _framesLock = new();
 
+        private readonly BoundedQueue<ForceSample> _pendingForceSamples =
+            new(capacity: 5000);
+
         private long _byteCount;
         private long _frameCount;
-        private long _errorCount;
         private int _frameIndex;
         private bool _rawDirty;
         private long _lastReceiveTicks;
+        private long _lastDecodedTicks;
         private bool _isClosing;
 
         public MainWindow()
@@ -64,6 +67,8 @@ namespace ForcePlateDevTool
             {
                 FlushRawBuffer();
                 FlushPendingFrames();
+                FlushPendingForceSamples();
+                UpdateStatisticsDisplay();
             };
             _rawFlushTimer.Start();
 
@@ -112,6 +117,8 @@ namespace ForcePlateDevTool
             SetStage(TxtReceiveStageStatus, "等待数据", Brushes.Gray);
             SetStage(TxtParseStageStatus, "等待帧", Brushes.Gray);
             SetStage(TxtDecodeStageStatus, "等待解码", Brushes.Gray);
+
+            SetConnectionSettingsEnabled(true);
         }
 
         private static void SetStage(TextBlock target, string message, Brush color)
@@ -119,6 +126,18 @@ namespace ForcePlateDevTool
             target.Text = message;
             target.Foreground = color;
             target.ToolTip = message;
+        }
+
+        private void SetConnectionSettingsEnabled(bool enabled)
+        {
+            TxtRemoteIP.IsEnabled = enabled;
+            TxtRemotePort.IsEnabled = enabled;
+            TxtLocalIP.IsEnabled = enabled;
+            TxtLocalPort.IsEnabled = enabled;
+            CmbMode.IsEnabled = enabled;
+
+            BtnConnect.IsEnabled = enabled;
+            BtnDisconnect.IsEnabled = !enabled;
         }
 
         private DiagnosticConfig BuildConfig()
@@ -157,20 +176,6 @@ namespace ForcePlateDevTool
         private void OnLogMessage(object? sender, string e)
         {
             Log(e);
-
-            // DiagnosticEngine currently reports malformed data as log messages rather
-            // than exposing a dedicated invalid-frame event. Count these as anomaly
-            // events, not as an exact count of invalid frames.
-            if (e.Contains("无效数据", StringComparison.OrdinalIgnoreCase) ||
-                e.Contains("解码失败", StringComparison.OrdinalIgnoreCase) ||
-                e.Contains("解码异常", StringComparison.OrdinalIgnoreCase))
-            {
-                long count = Interlocked.Increment(ref _errorCount);
-                Dispatcher.InvokeAsync(() => TxtErrorCount.Text = count.ToString());
-
-                Dispatcher.InvokeAsync(() =>
-                    SetStage(TxtParseStageStatus, "发现异常数据", Brushes.OrangeRed));
-            }
         }
 
         private void OnLinkState(object? sender, LinkStateEventArgs e)
@@ -184,6 +189,8 @@ namespace ForcePlateDevTool
                     TxtUdpStageStatus,
                     e.IsConnected ? "UDP socket 已就绪" : "未就绪",
                     e.IsConnected ? Brushes.ForestGreen : Brushes.Gray);
+
+                SetConnectionSettingsEnabled(!e.IsConnected);
 
                 if (!e.IsConnected)
                 {
@@ -281,12 +288,104 @@ namespace ForcePlateDevTool
             SetStage(TxtDecodeStageStatus, "已解码", Brushes.ForestGreen);
         }
 
+        private void FlushPendingForceSamples()
+        {
+            int processed = 0;
+            const int MaxSamplesPerTick = 1000;
+
+            while (processed < MaxSamplesPerTick &&
+                   _pendingForceSamples.TryDequeue(out var sample))
+            {
+                processed++;
+
+                Pedal pedal = ForceSampleRouter.Route(sample.SensorAddress);
+
+                if (pedal == Pedal.Left)
+                {
+                    LeftForceChart.AddSample(sample);
+
+                    TxtLeftFx.Text = sample.Fx.ToString("F3", CultureInfo.InvariantCulture);
+                    TxtLeftFy.Text = sample.Fy.ToString("F3", CultureInfo.InvariantCulture);
+                    TxtLeftFz.Text = sample.Fz.ToString("F3", CultureInfo.InvariantCulture);
+                }
+                else if (pedal == Pedal.Right)
+                {
+                    RightForceChart.AddSample(sample);
+
+                    TxtRightFx.Text = sample.Fx.ToString("F3", CultureInfo.InvariantCulture);
+                    TxtRightFy.Text = sample.Fy.ToString("F3", CultureInfo.InvariantCulture);
+                    TxtRightFz.Text = sample.Fz.ToString("F3", CultureInfo.InvariantCulture);
+                }
+
+                Interlocked.Exchange(
+                    ref _lastDecodedTicks,
+                    sample.Timestamp.Ticks);
+            }
+        }
+
+        private void UpdateStatisticsDisplay()
+        {
+            var stats = _engine.Statistics;
+
+            TxtByteCount.Text = stats.ReceivedBytes.ToString();
+            TxtFrameCount.Text = stats.DecodedFrames.ToString();
+
+            long anomalies = stats.InvalidDataEvents +
+                             stats.DecodeFailures +
+                             stats.DecodeExceptions;
+            TxtErrorCount.Text = anomalies.ToString();
+
+            if (stats.InvalidDataEvents > 0 || stats.DecodeFailures > 0)
+            {
+                SetStage(TxtParseStageStatus, "发现异常数据", Brushes.OrangeRed);
+            }
+
+            if (stats.DecodeExceptions > 0)
+            {
+                SetStage(TxtDecodeStageStatus, "解码异常", Brushes.OrangeRed);
+            }
+
+            bool hasDecodedData = stats.LastDecodedTime.HasValue;
+            bool isStale = !hasDecodedData ||
+                DateTime.Now - stats.LastDecodedTime!.Value >
+                TimeSpan.FromSeconds(2);
+
+            if (_engine.IsConnected)
+            {
+                if (!hasDecodedData)
+                {
+                    SetStage(TxtReceiveStageStatus, "已连接·等待数据", Brushes.DarkOrange);
+                }
+                else if (isStale)
+                {
+                    SetStage(
+                        TxtReceiveStageStatus,
+                        $"数据已停滞 · {stats.LastDecodedTime:HH:mm:ss}",
+                        Brushes.DarkOrange);
+                }
+                else
+                {
+                    SetStage(
+                        TxtReceiveStageStatus,
+                        $"正在接收 · {stats.LastDecodedTime:HH:mm:ss}",
+                        Brushes.ForestGreen);
+                }
+            }
+
+            long dropped = _pendingForceSamples.DroppedCount;
+            if (dropped > 0)
+            {
+                TxtFrameHeader.Text =
+                    $"已解码 {stats.DecodedFrames:N0} 帧 · 丢弃显示样本 {dropped:N0}";
+            }
+        }
+
         private static string MapPedal(byte address)
         {
-            return address switch
+            return ForceSampleRouter.Route(address) switch
             {
-                0xAA => "左踏板",
-                0xAB => "右踏板",
+                Pedal.Left => "左踏板",
+                Pedal.Right => "右踏板",
                 _ => $"未知(0x{address:X2})"
             };
         }
@@ -295,17 +394,24 @@ namespace ForcePlateDevTool
         {
             try
             {
+                if (e.Decoded == null)
+                    return;
+
                 long frameSeq = Interlocked.Increment(ref _frameCount);
 
                 var rows = new List<FrameRow>();
-
-                if (e.Decoded == null)
-                    return;
 
                 foreach (var obj in e.Decoded)
                 {
                     if (obj is not SensorData sd)
                         continue;
+
+                    _pendingForceSamples.Enqueue(new ForceSample(
+                        e.Timestamp,
+                        sd.SenserAddress,
+                        sd.Fx,
+                        sd.Fy,
+                        sd.Fz));
 
                     float[] data = sd.Data ?? Array.Empty<float>();
                     int usedCount = Math.Min(data.Length, 9);
@@ -371,7 +477,7 @@ namespace ForcePlateDevTool
 
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            BtnConnect.IsEnabled = false;
+            SetConnectionSettingsEnabled(false);
 
             try
             {
@@ -441,20 +547,27 @@ namespace ForcePlateDevTool
             }
             finally
             {
-                BtnConnect.IsEnabled = true;
+                if (!_engine.IsConnected)
+                {
+                    SetConnectionSettingsEnabled(true);
+                }
             }
         }
 
+        // 断开连接按钮点击事件处理
         private async void BtnDisconnect_Click(object sender, RoutedEventArgs e)
         {
+            // 先禁用按钮，防止用户在断开过程中重复点击
             BtnDisconnect.IsEnabled = false;
 
             try
             {
+                // 异步断开与设备的连接，等待操作完成
                 await _engine.DisconnectAsync();
             }
             finally
             {
+                // 无论断开成功还是失败，最终都恢复按钮可用状态
                 BtnDisconnect.IsEnabled = true;
             }
         }
@@ -475,32 +588,58 @@ namespace ForcePlateDevTool
 
         private async void BtnStart_Click(object sender, RoutedEventArgs e)
         {
-            if (!EndpointValidator.TryParse(
-                    TxtRemoteIP.Text.Trim(),
-                    TxtRemotePort.Text.Trim(),
-                    TxtLocalIP.Text.Trim(),
-                    TxtLocalPort.Text.Trim(),
-                    out string error))
+            if (!_engine.IsConnected)
             {
-                Log($"配置错误: {error}");
-                MessageBox.Show(error, "连接配置错误",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                Log("尚未连接设备，请先连接。");
+                SetStage(
+                    TxtCommandStageStatus,
+                    "未连接",
+                    Brushes.OrangeRed);
                 return;
             }
 
-            _engine.Configure(BuildConfig());
-            var result = await _engine.SendStartCommandAsync();
+            BtnStart.IsEnabled = false;
 
-            SetStage(
-                TxtCommandStageStatus,
-                result.Success ? "本地发送成功" : "发送失败",
-                result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
+            try
+            {
+                // Do not rebuild configuration here.
+                // The active socket and decoder must use the same configuration
+                // captured when ConnectAsync() initialized the connection.
+                var result = await _engine.SendStartCommandAsync();
 
-            Log(result.Message);
+                SetStage(
+                    TxtCommandStageStatus,
+                    result.Success ? "开始指令已提交" : "发送失败",
+                    result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
+
+                Log(result.Message);
+            }
+            catch (Exception ex)
+            {
+                Log($"启动采集失败: {ex.Message}");
+                SetStage(
+                    TxtCommandStageStatus,
+                    "启动失败",
+                    Brushes.OrangeRed);
+            }
+            finally
+            {
+                BtnStart.IsEnabled = true;
+            }
         }
 
         private async void BtnStop_Click(object sender, RoutedEventArgs e)
         {
+            if (!_engine.IsConnected)
+            {
+                Log("尚未连接设备，请先连接。");
+                SetStage(
+                    TxtCommandStageStatus,
+                    "未连接",
+                    Brushes.OrangeRed);
+                return;
+            }
+
             var result = await _engine.SendStopCommandAsync();
 
             SetStage(
@@ -517,6 +656,12 @@ namespace ForcePlateDevTool
             if (string.IsNullOrEmpty(hex))
             {
                 Log("请输入要发送的 HEX 指令");
+                return;
+            }
+
+            if (!_engine.IsConnected)
+            {
+                Log("尚未连接设备，请先连接。");
                 return;
             }
 
