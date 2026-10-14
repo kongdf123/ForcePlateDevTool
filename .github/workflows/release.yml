@@ -41,10 +41,13 @@ jobs:
           $parts = $version.Split('.')
           $assemblyVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
 
-          git fetch origin main --no-tags
+          git fetch origin main:refs/remotes/origin/main --no-tags
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to fetch main"
           }
+
+          Write-Host "Tagged commit: $env:GITHUB_SHA"
+          Write-Host "main tip: $(git rev-parse origin/main)"
 
           git merge-base --is-ancestor $env:GITHUB_SHA origin/main
           if ($LASTEXITCODE -ne 0) {
