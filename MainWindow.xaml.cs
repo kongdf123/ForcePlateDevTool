@@ -77,15 +77,33 @@ namespace ForcePlateDevTool
 
                 _rawFlushTimer.Stop();
 
+                // Hide immediately so the window vanishes from the screen while
+                // cleanup runs in the background. Without this, the window stays
+                // visible for the full duration of disposal + visual-tree teardown.
+                Hide();
+
                 try
                 {
-                    await _engine.DisconnectAsync();
+                    // Bound the cleanup so a hung receive loop can never block
+                    // window close indefinitely. On timeout the process exit and
+                    // OS socket reclamation still guarantee resource release.
+                    Task disposeTask = _engine.DisposeAsync().AsTask();
+                    Task timeout = Task.Delay(2000);
+                    await Task.WhenAny(disposeTask, timeout);
                 }
-                finally
+                catch
                 {
-                    _engine.Dispose();
-                    Close();
+                    // Best-effort cleanup; the window will close regardless.
                 }
+
+                // Empty the heavy controls before tearing down the visual tree.
+                // TxtLog is unbounded during a session, so leaving it full makes
+                // WPF's TextContainer disposal noticeably slow.
+                _frames.Clear();
+                TxtRawStream.Clear();
+                TxtLog.Clear();
+
+                Close();
             };
 
             SetStage(TxtNetworkStageStatus, "待检测", Brushes.Gray);

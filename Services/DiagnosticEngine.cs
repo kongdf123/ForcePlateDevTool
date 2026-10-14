@@ -132,9 +132,10 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
     {
         try
         {
+            _linker?.Close();
+
             await StopReceiveLoopAsync();
 
-            _linker?.Close();
             _linker?.Dispose();
             _linker = null;
 
@@ -384,11 +385,12 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
             return;
         _disposed = true;
 
-        // Synchronous fallback. The WPF window should prefer DisconnectAsync()
-        // during Closing so the receive task is awaited before disposal.
+        // Run on a thread-pool thread so the awaits inside DisconnectAsync do not
+        // try to resume on the caller's SynchronizationContext (e.g. the WPF UI
+        // thread), which would deadlock when this method blocks on GetResult().
         try
         {
-            DisconnectAsync().GetAwaiter().GetResult();
+            Task.Run(() => DisconnectAsync()).GetAwaiter().GetResult();
         }
         catch
         {
@@ -407,6 +409,16 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
             return;
         _disposed = true;
 
-        await DisconnectAsync();
+        try
+        {
+            await DisconnectAsync();
+        }
+        finally
+        {
+            _linker?.Dispose();
+            _linker = null;
+            _cts?.Dispose();
+            _cts = null;
+        }
     }
 }
