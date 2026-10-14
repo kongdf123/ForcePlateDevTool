@@ -30,6 +30,10 @@
   <ItemGroup>
     <Compile Remove="ProductionRef\**\*.cs" />
     <None Remove="ProductionRef\**\*.cs" />
+    <Compile Remove="ForcePlateDevTool.Tests\**\*.cs" />
+    <EmbeddedResource Remove="ForcePlateDevTool.Tests\**" />
+    <None Remove="ForcePlateDevTool.Tests\**" />
+    <Page Remove="ForcePlateDevTool.Tests\**" />
   </ItemGroup>
 
 </Project>

@@ -10,13 +10,19 @@ using ForcePlateDevTool.Models;
 
 namespace ForcePlateDevTool.Services;
 
-public class DiagnosticEngine : IDisposable
+public class DiagnosticEngine : IAsyncDisposable, IDisposable
 {
     private SocketLinker? _linker;
     private Decoder_76B_StartingBlock? _decoder;
+
+    private readonly object _receiveLock = new();
     private CancellationTokenSource? _cts;
+    private Task? _receiveTask;
+
     private readonly object _bufferLock = new();
     private List<byte> _buffer = new();
+
+    private bool _disposed;
 
     public DiagnosticConfig Config { get; private set; } = new();
 
@@ -54,6 +60,9 @@ public class DiagnosticEngine : IDisposable
 
     public async Task<bool> ConnectAsync()
     {
+        // Avoid replacing _linker while a previous receive task is still active.
+        await DisconnectAsync();
+
         try
         {
             var socketConfig = new SocketConfig
@@ -72,11 +81,11 @@ public class DiagnosticEngine : IDisposable
             if (opened)
             {
                 BuildDecoder();
-                LinkStateChanged?.Invoke(this, new LinkStateEventArgs(true, $"已就绪 {Config.RemoteIP}:{Config.RemotePort}"));
+                LinkStateChanged?.Invoke(this, new LinkStateEventArgs(true, $"UDP socket 已就绪 {Config.RemoteIP}:{Config.RemotePort}"));
                 return true;
             }
 
-            LinkStateChanged?.Invoke(this, new LinkStateEventArgs(false, "连接失败: Open() 返回 false"));
+            LinkStateChanged?.Invoke(this, new LinkStateEventArgs(false, "UDP socket 初始化失败: Open() 返回 false"));
             return false;
         }
         catch (Exception ex)
@@ -119,45 +128,95 @@ public class DiagnosticEngine : IDisposable
             $"支持地址位={_decoder.IsSupportAddress}");
     }
 
-    public void Disconnect()
+    public async Task DisconnectAsync()
     {
         try
         {
-            StopReceiveLoop();
+            await StopReceiveLoopAsync();
+
             _linker?.Close();
+            _linker?.Dispose();
+            _linker = null;
+
+            _decoder = null;
+
+            lock (_bufferLock)
+            {
+                _buffer.Clear();
+            }
+
+            LinkStateChanged?.Invoke(this, new LinkStateEventArgs(false, "已断开"));
         }
         catch (Exception ex)
         {
             LogMessage?.Invoke(this, $"断开异常: {ex.Message}");
         }
-        finally
+    }
+
+    public bool StartReceiveLoop()
+    {
+        lock (_receiveLock)
         {
-            LinkStateChanged?.Invoke(this, new LinkStateEventArgs(false, "已断开连接"));
+            if (_linker == null || !_linker.IsOpen())
+            {
+                LogMessage?.Invoke(this, "无法启动接收: UDP socket 未就绪");
+                return false;
+            }
+
+            if (_receiveTask is { IsCompleted: false })
+            {
+                LogMessage?.Invoke(this, "接收循环已在运行，无需重复启动");
+                return false;
+            }
+
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+
+            var token = _cts.Token;
+            _receiveTask = Task.Run(() => ReceiveLoop(token), token);
+
+            return true;
         }
     }
 
-    public void StartReceiveLoop()
+    public async Task StopReceiveLoopAsync()
     {
-        if (_linker == null || !_linker.IsOpen())
+        Task? task;
+        CancellationTokenSource? cts;
+
+        lock (_receiveLock)
         {
-            LogMessage?.Invoke(this, "无法启动接收: 连接未建立");
-            return;
+            cts = _cts;
+            task = _receiveTask;
+            cts?.Cancel();
         }
 
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
-
-        Task.Run(() => ReceiveLoop(token), token);
-    }
-
-    public void StopReceiveLoop()
-    {
-        try
+        if (task != null)
         {
-            _cts?.Cancel();
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected during shutdown.
+            }
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke(this, $"等待接收循环结束时发生异常: {ex.Message}");
+            }
         }
-        catch { }
-        _cts = null;
+
+        lock (_receiveLock)
+        {
+            if (ReferenceEquals(_cts, cts))
+            {
+                _cts = null;
+                _receiveTask = null;
+            }
+        }
+
+        cts?.Dispose();
     }
 
     private void ReceiveLoop(CancellationToken token)
@@ -203,13 +262,16 @@ public class DiagnosticEngine : IDisposable
             {
                 if (invalidBytes.Length > 0)
                 {
-                    LogMessage?.Invoke(this, $"丢弃 {invalidBytes.Length} 字节无效数据: {BitConverter.ToString(invalidBytes).Replace("-", " ").Substring(0, Math.Min(60, invalidBytes.Length * 3))}");
+                    string snippet = BitConverter.ToString(invalidBytes).Replace("-", " ");
+                    if (snippet.Length > 60)
+                        snippet = snippet.Substring(0, 60);
+                    LogMessage?.Invoke(this, $"丢弃 {invalidBytes.Length} 字节无效数据: {snippet}");
                 }
             });
 
             _buffer = localBuffer;
 
-            if (_buffer.Count > DataLength * 8)
+            if (_buffer.Count > DataLength * 8 && DataLength > 0)
             {
                 _buffer.RemoveRange(0, _buffer.Count - DataLength);
             }
@@ -245,31 +307,47 @@ public class DiagnosticEngine : IDisposable
         }
     }
 
-    public async Task SendCommandAsync(byte[] command)
+    public async Task<CommandSendResult> SendCommandAsync(byte[] command)
     {
         if (_linker == null || !_linker.IsOpen())
         {
-            LogMessage?.Invoke(this, "无法发送: 连接未建立");
-            return;
+            const string message = "无法发送: UDP socket 未就绪";
+            LogMessage?.Invoke(this, message);
+
+            return new CommandSendResult(false, message, command);
         }
 
         try
         {
             await Task.Run(() => _linker.Send(command));
-            LogMessage?.Invoke(this, $"已发送: {BitConverter.ToString(command).Replace("-", " ")}");
+
+            string message =
+                $"本地发送调用成功: " +
+                $"{BitConverter.ToString(command).Replace("-", " ")}";
+
+            LogMessage?.Invoke(this, message);
+
+            return new CommandSendResult(true, message, command);
         }
         catch (Exception ex)
         {
-            LogMessage?.Invoke(this, $"发送异常: {ex.Message}");
+            string message = $"发送失败: {ex.Message}";
+            LogMessage?.Invoke(this, message);
+
+            return new CommandSendResult(false, message, command);
         }
     }
 
-    public Task SendStartCommandAsync()
+    public Task<CommandSendResult> SendStartCommandAsync()
     {
         if (_decoder == null)
         {
-            LogMessage?.Invoke(this, "无法发送开始指令: 解码器未就绪");
-            return Task.CompletedTask;
+            const string message = "无法发送开始指令: 解码器未就绪";
+
+            LogMessage?.Invoke(this, message);
+
+            return Task.FromResult(
+                new CommandSendResult(false, message, Array.Empty<byte>()));
         }
 
         KW_CMD cmd = Config.CollectionMode switch
@@ -284,12 +362,16 @@ public class DiagnosticEngine : IDisposable
         return SendCommandAsync(bytes);
     }
 
-    public Task SendStopCommandAsync()
+    public Task<CommandSendResult> SendStopCommandAsync()
     {
         if (_decoder == null)
         {
-            LogMessage?.Invoke(this, "无法发送停止指令: 解码器未就绪");
-            return Task.CompletedTask;
+            const string message = "无法发送停止指令: 解码器未就绪";
+
+            LogMessage?.Invoke(this, message);
+
+            return Task.FromResult(
+                new CommandSendResult(false, message, Array.Empty<byte>()));
         }
 
         byte[] bytes = _decoder.GetCommand((int)KW_CMD.CMD43, Config.StationAddress);
@@ -298,7 +380,33 @@ public class DiagnosticEngine : IDisposable
 
     public void Dispose()
     {
-        Disconnect();
+        if (_disposed)
+            return;
+        _disposed = true;
+
+        // Synchronous fallback. The WPF window should prefer DisconnectAsync()
+        // during Closing so the receive task is awaited before disposal.
+        try
+        {
+            DisconnectAsync().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Best-effort cleanup for the synchronous path.
+        }
+
         _linker?.Dispose();
+        _linker = null;
+        _cts?.Dispose();
+        _cts = null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+
+        await DisconnectAsync();
     }
 }

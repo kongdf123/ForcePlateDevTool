@@ -44,6 +44,7 @@ namespace ForcePlateDevTool
         private int _frameIndex;
         private bool _rawDirty;
         private long _lastReceiveTicks;
+        private bool _isClosing;
 
         public MainWindow()
         {
@@ -66,14 +67,29 @@ namespace ForcePlateDevTool
             };
             _rawFlushTimer.Start();
 
-            Closed += (_, _) =>
+            Closing += async (_, e) =>
             {
+                if (_isClosing)
+                    return;
+
+                e.Cancel = true;
+                _isClosing = true;
+
                 _rawFlushTimer.Stop();
-                _engine.Dispose();
+
+                try
+                {
+                    await _engine.DisconnectAsync();
+                }
+                finally
+                {
+                    _engine.Dispose();
+                    Close();
+                }
             };
 
             SetStage(TxtNetworkStageStatus, "待检测", Brushes.Gray);
-            SetStage(TxtTcpStageStatus, "未就绪", Brushes.Gray);
+            SetStage(TxtUdpStageStatus, "未就绪", Brushes.Gray);
             SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
             SetStage(TxtReceiveStageStatus, "等待数据", Brushes.Gray);
             SetStage(TxtParseStageStatus, "等待帧", Brushes.Gray);
@@ -100,9 +116,9 @@ namespace ForcePlateDevTool
             return new DiagnosticConfig
             {
                 RemoteIP = TxtRemoteIP.Text.Trim(),
-                RemotePort = int.TryParse(TxtRemotePort.Text.Trim(), out int rp) ? rp : 5152,
+                RemotePort = int.Parse(TxtRemotePort.Text.Trim()),
                 LocalIP = TxtLocalIP.Text.Trim(),
-                LocalPort = int.TryParse(TxtLocalPort.Text.Trim(), out int lp) ? lp : 8886,
+                LocalPort = int.Parse(TxtLocalPort.Text.Trim()),
                 StationAddress = 0xAA,
                 CollectionMode = mode
             };
@@ -147,8 +163,8 @@ namespace ForcePlateDevTool
                 TxtStatus.Foreground = e.IsConnected ? Brushes.ForestGreen : Brushes.Gray;
 
                 SetStage(
-                    TxtTcpStageStatus,
-                    e.IsConnected ? "已就绪" : "未就绪",
+                    TxtUdpStageStatus,
+                    e.IsConnected ? "UDP socket 已就绪" : "未就绪",
                     e.IsConnected ? Brushes.ForestGreen : Brushes.Gray);
 
                 if (!e.IsConnected)
@@ -338,45 +354,72 @@ namespace ForcePlateDevTool
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
             BtnConnect.IsEnabled = false;
-            SetStage(TxtTcpStageStatus, "检测中", Brushes.DarkOrange);
 
             try
             {
-                _engine.Configure(BuildConfig());
-
-                string ip = TxtRemoteIP.Text.Trim();
-                string pingResult = await _engine.PingAsync(ip, 1500);
-                bool reachable = pingResult.Contains("成功", StringComparison.Ordinal);
-                Log(pingResult);
-                SetStage(
-                    TxtNetworkStageStatus,
-                    reachable ? "可达" : "不可达",
-                    reachable ? Brushes.ForestGreen : Brushes.OrangeRed);
-
-                if (!reachable)
+                if (!EndpointValidator.TryParse(
+                        TxtRemoteIP.Text.Trim(),
+                        TxtRemotePort.Text.Trim(),
+                        TxtLocalIP.Text.Trim(),
+                        TxtLocalPort.Text.Trim(),
+                        out string error))
                 {
-                    SetStage(TxtTcpStageStatus, "未就绪", Brushes.Gray);
-                    Log($"连接中止: 设备 {ip} 不可达，请检查设备电源、网络连接及 IP 地址配置。");
+                    Log($"配置错误: {error}");
+                    MessageBox.Show(error, "连接配置错误",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
 
-                SetStage(TxtTcpStageStatus, "建立中", Brushes.DarkOrange);
+                _engine.Configure(BuildConfig());
+
+                // Ping is diagnostic evidence only. A failed ICMP request must not
+                // prevent UDP testing.
+                string ip = TxtRemoteIP.Text.Trim();
+                string pingResult = await _engine.PingAsync(ip, 1500);
+                bool reachable = pingResult.Contains("成功", StringComparison.Ordinal);
+
+                Log(pingResult);
+
+                SetStage(
+                    TxtNetworkStageStatus,
+                    reachable ? "Ping 可达" : "Ping 未响应",
+                    reachable ? Brushes.ForestGreen : Brushes.DarkOrange);
+
+                // Continue regardless of the Ping result.
+                SetStage(TxtUdpStageStatus, "初始化 UDP", Brushes.DarkOrange);
                 bool ok = await _engine.ConnectAsync();
 
-                if (ok)
+                if (!ok)
                 {
-                    SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
-                    SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
-                    _engine.StartReceiveLoop();
-                    await _engine.SendStartCommandAsync();
-                    SetStage(TxtCommandStageStatus, "已发送开始指令", Brushes.DarkOrange);
-                    Log("已自动发送开始采集指令");
+                    SetStage(TxtUdpStageStatus, "初始化失败", Brushes.OrangeRed);
+                    return;
                 }
+
+                SetStage(TxtCommandStageStatus, "待验证", Brushes.Gray);
+                SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
+
+                bool receiveStarted = _engine.StartReceiveLoop();
+                if (!receiveStarted)
+                {
+                    SetStage(TxtReceiveStageStatus, "接收循环未启动", Brushes.OrangeRed);
+                    return;
+                }
+
+                var result = await _engine.SendStartCommandAsync();
+
+                SetStage(
+                    TxtCommandStageStatus,
+                    result.Success
+                        ? "本地发送成功，等待设备数据"
+                        : "发送失败",
+                    result.Success
+                        ? Brushes.DarkOrange
+                        : Brushes.OrangeRed);
             }
             catch (Exception ex)
             {
                 Log($"连接操作失败: {ex.Message}");
-                SetStage(TxtTcpStageStatus, "异常", Brushes.OrangeRed);
+                SetStage(TxtUdpStageStatus, "异常", Brushes.OrangeRed);
             }
             finally
             {
@@ -384,30 +427,70 @@ namespace ForcePlateDevTool
             }
         }
 
-        private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
+        private async void BtnDisconnect_Click(object sender, RoutedEventArgs e)
         {
-            _engine.Disconnect();
+            BtnDisconnect.IsEnabled = false;
+
+            try
+            {
+                await _engine.DisconnectAsync();
+            }
+            finally
+            {
+                BtnDisconnect.IsEnabled = true;
+            }
         }
 
         private void BtnStartReceive_Click(object sender, RoutedEventArgs e)
         {
-            _engine.StartReceiveLoop();
-            SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
-            Log("已请求启动原始数据接收（不发送采集指令）");
+            bool started = _engine.StartReceiveLoop();
+            if (started)
+            {
+                SetStage(TxtReceiveStageStatus, "等待数据", Brushes.DarkOrange);
+                Log("已请求启动原始数据接收（不发送采集指令）");
+            }
+            else
+            {
+                SetStage(TxtReceiveStageStatus, "接收循环未启动", Brushes.OrangeRed);
+            }
         }
 
         private async void BtnStart_Click(object sender, RoutedEventArgs e)
         {
+            if (!EndpointValidator.TryParse(
+                    TxtRemoteIP.Text.Trim(),
+                    TxtRemotePort.Text.Trim(),
+                    TxtLocalIP.Text.Trim(),
+                    TxtLocalPort.Text.Trim(),
+                    out string error))
+            {
+                Log($"配置错误: {error}");
+                MessageBox.Show(error, "连接配置错误",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             _engine.Configure(BuildConfig());
-            SetStage(TxtCommandStageStatus, "已发送开始指令", Brushes.DarkOrange);
-            await _engine.SendStartCommandAsync();
-            Log("已请求发送开始采集指令");
+            var result = await _engine.SendStartCommandAsync();
+
+            SetStage(
+                TxtCommandStageStatus,
+                result.Success ? "本地发送成功" : "发送失败",
+                result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
+
+            Log(result.Message);
         }
 
         private async void BtnStop_Click(object sender, RoutedEventArgs e)
         {
-            await _engine.SendStopCommandAsync();
-            Log("已请求发送停止采集指令");
+            var result = await _engine.SendStopCommandAsync();
+
+            SetStage(
+                TxtCommandStageStatus,
+                result.Success ? "停止指令已发送" : "发送失败",
+                result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
+
+            Log(result.Message);
         }
 
         private async void BtnSendRaw_Click(object sender, RoutedEventArgs e)
@@ -422,7 +505,8 @@ namespace ForcePlateDevTool
             try
             {
                 byte[] bytes = ParseHex(hex);
-                await _engine.SendCommandAsync(bytes);
+                var result = await _engine.SendCommandAsync(bytes);
+                Log(result.Message);
             }
             catch (Exception ex)
             {

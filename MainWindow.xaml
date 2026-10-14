@@ -212,8 +212,8 @@
                 </Border>
                 <Border Style="{StaticResource StageCard}">
                     <StackPanel>
-                        <TextBlock Text="02  UDP 连接" FontWeight="SemiBold"/>
-                        <TextBlock x:Name="TxtTcpStageStatus"
+                        <TextBlock Text="02  UDP Socket" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="TxtUdpStageStatus"
                                    Text="未就绪" Style="{StaticResource StageStatus}"/>
                     </StackPanel>
                 </Border>
