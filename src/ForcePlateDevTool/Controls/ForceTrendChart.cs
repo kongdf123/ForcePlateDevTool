@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Windows;
 using System.Windows.Media;
 using ForcePlateDevTool.Models;
@@ -53,13 +54,13 @@ public sealed class ForceTrendChart : FrameworkElement
             null,
             new Rect(0, 0, width, height));
 
-        if (width < 100 || height < 80)
+        if (width < 140 || height < 100)
             return;
 
-        const double left = 42;
-        const double right = 12;
-        const double top = 12;
-        const double bottom = 26;
+        const double left = 62;
+        const double right = 16;
+        const double top = 24;
+        const double bottom = 48;
 
         double plotWidth = width - left - right;
         double plotHeight = height - top - bottom;
@@ -71,15 +72,104 @@ public sealed class ForceTrendChart : FrameworkElement
             new SolidColorBrush(Color.FromRgb(225, 230, 237)),
             1);
 
+        var axisPen = new Pen(
+            new SolidColorBrush(Color.FromRgb(100, 116, 139)),
+            1.2);
+
+        float[] values = samples
+            .SelectMany(s => new[] { s.Fx, s.Fy, s.Fz })
+            .Where(float.IsFinite)
+            .ToArray();
+
+        float min = values.Length > 0 ? values.Min() : -1f;
+        float max = values.Length > 0 ? values.Max() : 1f;
+
+        min = Math.Min(min, 0f);
+        max = Math.Max(max, 0f);
+
+        if (max - min < 0.001f)
+        {
+            min -= 1f;
+            max += 1f;
+        }
+
+        float padding = (max - min) * 0.05f;
+        min -= padding;
+        max += padding;
+
+        double range = max - min;
+
         for (int i = 0; i <= 4; i++)
         {
-            double y = top + plotHeight * i / 4.0;
+            double fraction = i / 4.0;
+            double y = top + fraction * plotHeight;
+            double forceValue = max - fraction * range;
 
             dc.DrawLine(
                 gridPen,
                 new Point(left, y),
                 new Point(left + plotWidth, y));
+
+            DrawText(
+                dc,
+                forceValue.ToString(
+                    "G4",
+                    CultureInfo.InvariantCulture),
+                10,
+                Brushes.Gray,
+                new Point(2, y - 7));
         }
+
+        for (int i = 0; i <= 4; i++)
+        {
+            double fraction = i / 4.0;
+            double x = left + fraction * plotWidth;
+
+            dc.DrawLine(
+                gridPen,
+                new Point(x, top),
+                new Point(x, top + plotHeight));
+
+            double msAgo =
+                VisibleWindow.TotalMilliseconds * (1.0 - fraction);
+
+            string label = msAgo == 0
+                ? "0 ms"
+                : $"-{msAgo:0} ms";
+
+            DrawText(
+                dc,
+                label,
+                10,
+                Brushes.Gray,
+                new Point(x - 18, top + plotHeight + 6));
+        }
+
+        dc.DrawLine(
+            axisPen,
+            new Point(left, top),
+            new Point(left, top + plotHeight));
+
+        dc.DrawLine(
+            axisPen,
+            new Point(left, top + plotHeight),
+            new Point(left + plotWidth, top + plotHeight));
+
+        DrawText(
+            dc,
+            "Force (N)",
+            11,
+            Brushes.DimGray,
+            new Point(2, 2));
+
+        DrawText(
+            dc,
+            "Time(ms)",
+            11,
+            Brushes.DimGray,
+            new Point(
+                left + plotWidth / 2 - 24,
+                top + plotHeight + 27));
 
         if (samples.Count < 2)
         {
@@ -93,59 +183,8 @@ public sealed class ForceTrendChart : FrameworkElement
             return;
         }
 
-        float min = samples
-            .SelectMany(s => new[] { s.Fx, s.Fy, s.Fz })
-            .Where(float.IsFinite)
-            .DefaultIfEmpty(-1)
-            .Min();
-
-        float max = samples
-            .SelectMany(s => new[] { s.Fx, s.Fy, s.Fz })
-            .Where(float.IsFinite)
-            .DefaultIfEmpty(1)
-            .Max();
-
-        // Include zero and avoid a zero-height scale.
-        min = Math.Min(min, 0);
-        max = Math.Max(max, 0);
-
-        if (max - min < 0.001f)
-        {
-            min -= 1;
-            max += 1;
-        }
-
-        double range = max - min;
         DateTime newest = samples[^1].Timestamp;
         DateTime oldest = newest - VisibleWindow;
-
-        DrawText(
-            dc,
-            max.ToString("F1"),
-            10,
-            Brushes.Gray,
-            new Point(2, top - 5));
-
-        DrawText(
-            dc,
-            min.ToString("F1"),
-            10,
-            Brushes.Gray,
-            new Point(2, top + plotHeight - 8));
-
-        DrawText(
-            dc,
-            "10 s",
-            10,
-            Brushes.Gray,
-            new Point(left, top + plotHeight + 5));
-
-        DrawText(
-            dc,
-            "Now",
-            10,
-            Brushes.Gray,
-            new Point(left + plotWidth - 24, top + plotHeight + 5));
 
         DrawSeries(
             dc, samples, s => s.Fx,
