@@ -195,6 +195,9 @@ namespace ForcePlateDevTool
 
                 SetConnectionSettingsEnabled(!e.IsConnected);
 
+                BtnSimulateTrigger.IsEnabled = e.IsConnected &&
+                    _engine.Config.CollectionMode == CollectionMode.OnlyTrigger;
+
                 if (!e.IsConnected)
                 {
                     Interlocked.Exchange(ref _lastReceiveTicks, 0);
@@ -651,6 +654,52 @@ namespace ForcePlateDevTool
                 result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
 
             Log(result.Message);
+        }
+
+        private async void BtnSimulateTrigger_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_engine.IsConnected)
+            {
+                Log("尚未连接设备，请先连接。");
+                SetStage(
+                    TxtCommandStageStatus,
+                    "未连接",
+                    Brushes.OrangeRed);
+                return;
+            }
+
+            BtnSimulateTrigger.IsEnabled = false;
+
+            try
+            {
+                var result = await _engine.SendTriggerCommandAsync();
+
+                SetStage(
+                    TxtCommandStageStatus,
+                    result.Success ? "模拟枪响已发送，等待设备推流" : "模拟触发失败",
+                    result.Success ? Brushes.DarkOrange : Brushes.OrangeRed);
+
+                Log(result.Message);
+
+                if (result.Success)
+                {
+                    Log("[模拟触发] 已发送 CMD48，等效于发令枪硬件触发信号。" +
+                        "若设备不推流，尝试先发 CMD43 停止再发 CMD48。");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"模拟触发失败: {ex.Message}");
+                SetStage(
+                    TxtCommandStageStatus,
+                    "模拟触发异常",
+                    Brushes.OrangeRed);
+            }
+            finally
+            {
+                BtnSimulateTrigger.IsEnabled = _engine.IsConnected &&
+                    _engine.Config.CollectionMode == CollectionMode.OnlyTrigger;
+            }
         }
 
         private async void BtnSendRaw_Click(object sender, RoutedEventArgs e)

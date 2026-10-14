@@ -420,6 +420,27 @@ public class DiagnosticEngine : IAsyncDisposable, IDisposable
         return SendCommandAsync(bytes);
     }
 
+    /// <summary>
+    /// 发送 CMD48 作为软件触发信号，等效于发令枪硬件触发。
+    /// 仅在 OnlyTrigger 模式下有意义：设备此前已被 CMD58 武装，
+    /// 收到 CMD48 后开始推流。
+    /// </summary>
+    public Task<CommandSendResult> SendTriggerCommandAsync()
+    {
+        if (_decoder == null)
+        {
+            const string message = "无法发送触发指令: 解码器未就绪";
+
+            LogMessage?.Invoke(this, message);
+
+            return Task.FromResult(
+                new CommandSendResult(false, message, Array.Empty<byte>()));
+        }
+
+        byte[] bytes = _decoder.GetCommand((int)KW_CMD.CMD48, Config.StationAddress);
+        return SendCommandAsync(bytes);
+    }
+
     public void Dispose()
     {
         if (_disposed)

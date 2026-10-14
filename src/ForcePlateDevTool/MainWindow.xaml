@@ -353,6 +353,11 @@
                         <Button x:Name="BtnStartReceive"
                                 Content="仅接收"
                                 Click="BtnStartReceive_Click"/>
+                        <Button x:Name="BtnSimulateTrigger"
+                                Content="模拟枪响 (CMD48)"
+                                Click="BtnSimulateTrigger_Click"
+                                IsEnabled="False"
+                                ToolTip="仅外部触发模式下：发送 CMD48 模拟发令枪硬件触发，让已武装的设备开始推流"/>
                     </StackPanel>
 
                     <TextBlock Grid.Row="2"
