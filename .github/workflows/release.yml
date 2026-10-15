@@ -174,7 +174,8 @@ jobs:
           }
 
           $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX))
+          $pfxBase64 = $env:CODE_SIGN_PFX -replace '\s', ''
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
 
           try {
             & $signtool sign `
@@ -228,7 +229,8 @@ jobs:
             }
 
             $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX))
+            $pfxBase64 = $env:CODE_SIGN_PFX -replace '\s', ''
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
 
             try {
               & $signtool sign `
