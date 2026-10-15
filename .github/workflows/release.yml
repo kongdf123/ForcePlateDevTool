@@ -128,7 +128,7 @@ jobs:
       - name: Install pinned Inno Setup
         shell: pwsh
         run: |
-          choco install innosetup --version="$env:INNO_SETUP_VERSION" --no-progress -y
+          choco install innosetup --version="$env:INNO_SETUP_VERSION" --allow-downgrade --no-progress -y
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to install pinned Inno Setup $env:INNO_SETUP_VERSION"
           }
