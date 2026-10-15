@@ -13,15 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate-tag:
-    name: Validate release tag
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      version: ${{ steps.meta.outputs.version }}
-      assembly_version: ${{ steps.meta.outputs.assembly_version }}
-      short_sha: ${{ steps.meta.outputs.short_sha }}
-      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+  release:
+    name: Build and publish Windows x64 release
+    runs-on: windows-latest
 
     steps:
       - name: Checkout tagged source
@@ -29,54 +23,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate tag and source branch
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAG="${GITHUB_REF_NAME}"
-
-          if [[ ! "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Use a stable or prerelease tag such as v1.2.0 or v1.2.0-rc.1"
-            exit 1
-          fi
-
-          VERSION="${TAG#v}"
-          MAJOR="${BASH_REMATCH[1]}"
-          MINOR="${BASH_REMATCH[2]}"
-          PATCH="${BASH_REMATCH[3]}"
-          ASSEMBLY_VERSION="${MAJOR}.${MINOR}.${PATCH}.0"
-          SHORT_SHA="${GITHUB_SHA::7}"
-
-          if [[ "$TAG" == *-* ]]; then
-            IS_PRERELEASE=true
-          else
-            IS_PRERELEASE=false
-          fi
-
-          git fetch origin main:refs/remotes/origin/main --no-tags
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "assembly_version=$ASSEMBLY_VERSION" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
-
-  test:
-    name: Run solution tests
-    needs: validate-tag
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@v4
-
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+
+      - name: Validate release tag and source branch
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+
+          if ($tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw "Use a stable release tag such as v1.2.0"
+          }
+
+          $version = $tag.Substring(1)
+          $parts = $version.Split('.')
+          $assemblyVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+
+          git fetch origin main:refs/remotes/origin/main --no-tags
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch main"
+          }
+
+          Write-Host "Tagged commit: $env:GITHUB_SHA"
+          Write-Host "main tip: $(git rev-parse origin/main)"
+
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag must point to a commit reachable from main"
+          }
+
+          "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_VERSION=$version" | Out-File $env:GITHUB_ENV -Append
+          "ASSEMBLY_VERSION=$assemblyVersion" | Out-File $env:GITHUB_ENV -Append
+          "SHORT_SHA=$($env:GITHUB_SHA.Substring(0, 7))" | Out-File $env:GITHUB_ENV -Append
 
       - name: Restore solution
         run: dotnet restore ForcePlateDevTool.sln
@@ -84,49 +65,16 @@ jobs:
       - name: Run tests
         run: dotnet test ForcePlateDevTool.sln --configuration Release --no-restore
 
-  build:
-    name: Build ${{ matrix.runtime }}
-    needs: [validate-tag, test]
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runtime: win-x64
-            runner: windows-latest
-          - runtime: win-x86
-            runner: windows-latest
-          - runtime: linux-x64
-            runner: ubuntu-latest
-          - runtime: osx-arm64
-            runner: macos-latest
-
-    steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Publish self-contained ${{ matrix.runtime }} app
+      - name: Publish self-contained Windows x64 app
         shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
-          ASSEMBLY_VERSION: ${{ needs.validate-tag.outputs.assembly_version }}
-          SHORT_SHA: ${{ needs.validate-tag.outputs.short_sha }}
-          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
         run: |
-          $publishDir = "artifacts/publish-${{ matrix.runtime }}"
+          $publishDir = "artifacts/publish"
           $project = "src/ForcePlateDevTool/ForcePlateDevTool.csproj"
           $infoVersion = "$($env:RELEASE_VERSION)+$($env:SHORT_SHA)"
 
           dotnet publish $project `
             --configuration Release `
-            --runtime "${{ matrix.runtime }}" `
+            --runtime win-x64 `
             --self-contained true `
             --output $publishDir `
             "-p:Version=$env:RELEASE_VERSION" `
@@ -135,7 +83,7 @@ jobs:
             "-p:InformationalVersion=$infoVersion"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Publish failed for ${{ matrix.runtime }}"
+            throw "Publish failed"
           }
 
           @(
@@ -144,7 +92,7 @@ jobs:
             "InformationalVersion: $infoVersion"
             "GitTag: $env:RELEASE_TAG"
             "Commit: $env:GITHUB_SHA"
-            "Runtime: ${{ matrix.runtime }}"
+            "Runtime: win-x64"
             "Deployment: self-contained portable ZIP"
             "BuildTimeUtc: $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
           ) | Set-Content "$publishDir/VERSION.txt" -Encoding utf8
@@ -153,77 +101,43 @@ jobs:
             "ForcePlateDevTool $env:RELEASE_VERSION"
             ""
             "Extract the complete ZIP package into a folder."
-            "Run ForcePlateDevTool.exe or the platform binary from that folder."
+            "Run ForcePlateDevTool.exe from that folder."
             "Keep all packaged files together."
             ""
             "See VERSION.txt for build and source information."
           ) | Set-Content "$publishDir/README.txt" -Encoding utf8
 
-      - name: Create ZIP and checksum
+      - name: Create ZIP and SHA-256 checksum
         shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
 
-          $zip = "artifacts/ForcePlateDevTool-v$($env:RELEASE_VERSION)-${{ matrix.runtime }}.zip"
-          Compress-Archive -Path "artifacts/publish-${{ matrix.runtime }}/*" -DestinationPath $zip -Force
+          $zip = "artifacts/ForcePlateDevTool-v$($env:RELEASE_VERSION)-win-x64.zip"
+          Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip
 
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
           "$hash  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ascii
 
-      - name: Upload runtime artifact
+          "RELEASE_ZIP=$zip" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_CHECKSUM=$zip.sha256" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Upload release ZIP as Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ForcePlateDevTool-v${{ needs.validate-tag.outputs.version }}-${{ matrix.runtime }}
+          name: ForcePlateDevTool-v${{ env.RELEASE_VERSION }}-win-x64
           path: |
-            artifacts/ForcePlateDevTool-v${{ needs.validate-tag.outputs.version }}-${{ matrix.runtime }}.zip
-            artifacts/ForcePlateDevTool-v${{ needs.validate-tag.outputs.version }}-${{ matrix.runtime }}.zip.sha256
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.RELEASE_CHECKSUM }}
           if-no-files-found: error
 
-  release:
-    name: Publish release assets
-    needs: [validate-tag, build]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download all release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          pattern: ForcePlateDevTool-v${{ needs.validate-tag.outputs.version }}-*
-          merge-multiple: false
-
-      - name: Publish GitHub Release
+      - name: Publish private GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
-          IS_PRERELEASE: ${{ needs.validate-tag.outputs.is_prerelease }}
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-
-          FILES=( $(find release-assets -type f \( -name '*.zip' -o -name '*.sha256' \) | sort) )
-
-          if [[ ${#FILES[@]} -eq 0 ]]; then
-            echo "No release artifacts were produced."
-            exit 1
-          fi
-
-          if gh release view "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${FILES[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
-            exit 0
-          fi
-
-          EXTRA_ARGS=()
-          if [[ "$IS_PRERELEASE" == "true" ]]; then
-            EXTRA_ARGS+=(--prerelease)
-          fi
-
-          gh release create "$RELEASE_TAG" "${FILES[@]}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --verify-tag \
-            --title "ForcePlateDevTool ${RELEASE_VERSION}" \
-            --generate-notes \
-            "${EXTRA_ARGS[@]}"
+          gh release create $env:RELEASE_TAG `
+            "$env:RELEASE_ZIP" `
+            "$env:RELEASE_CHECKSUM" `
+            --verify-tag `
+            --title "ForcePlateDevTool $env:RELEASE_VERSION" `
+            --generate-notes
