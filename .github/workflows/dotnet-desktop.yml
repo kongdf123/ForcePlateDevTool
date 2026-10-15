@@ -58,7 +58,11 @@ jobs:
         shell: pwsh
         run: |
           $publishDir = "artifacts/ci-publish"
-          $zipFile = "artifacts/ForcePlateDevTool-CI-${{ github.run_number }}-${{ github.sha.substring(0,7) }}.zip"
+
+          # compute a short sha and run number for artifact naming (do this in PowerShell, not in ${{ }})
+          $shortSha = $env:GITHUB_SHA.Substring(0,7)
+          $runNum = $env:GITHUB_RUN_NUMBER
+          $zipFile = "artifacts/ForcePlateDevTool-CI-$runNum-$shortSha.zip"
 
           Write-Host "Publish output: $publishDir"
           New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
