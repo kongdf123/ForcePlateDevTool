@@ -136,7 +136,6 @@ jobs:
             throw "Inno Setup compiler not found: $iscc"
           }
 
-          # Compile installer (RELEASE_VERSION read by the installer script via GetEnv)
           Write-Host "Compiling installer with ISCC: $iscc"
           & $iscc "installer/ForcePlateDevTool.iss"
           if ($LASTEXITCODE -ne 0) {
@@ -147,7 +146,6 @@ jobs:
           $zip = "artifacts/ForcePlateDevTool-v$version-win-x64.zip"
           $setup = "artifacts/ForcePlateDevTool-Setup-v$version.exe"
 
-          # Create portable ZIP from published files
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip -CompressionLevel Optimal
 
@@ -159,18 +157,15 @@ jobs:
             throw "Installer output not found: $setup"
           }
 
-          # Optional code-signing step (only if secrets.CODE_SIGN_PFX and secrets.CODESIGN_PASSWORD are configured)
           if ($env:CODE_SIGN_PFX -and $env:CODESIGN_PASSWORD) {
             Write-Host "Signing installer and primary exe (attempt)."
             $pfxBase64 = $env:CODE_SIGN_PFX
             $pfxPath = "artifacts/codesign.pfx"
             [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
 
-            # Import certificate to CurrentUser\My temporary store and sign
             $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
             $cert.Import($pfxPath, $env:CODESIGN_PASSWORD, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
 
-            # Use signtool if available
             $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
             if (-not (Test-Path $signtool)) {
               Write-Host "signtool not found at $signtool; skipping signing step."
@@ -184,7 +179,6 @@ jobs:
             Write-Host "Code signing not configured; skipping signing step."
           }
 
-          # Write SHA-256 checksums
           foreach ($file in @($zip, $setup)) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash
             "$hash  $(Split-Path $file -Leaf)" | Set-Content "$file.sha256" -Encoding ascii

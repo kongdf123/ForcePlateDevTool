@@ -59,7 +59,7 @@ jobs:
         run: |
           $publishDir = "artifacts/ci-publish"
 
-          # compute a short sha and run number for artifact naming (do this in PowerShell, not in ${{ }})
+          # compute a short sha and run number for artifact naming (do this in PowerShell, not in GitHub expression syntax)
           $shortSha = $env:GITHUB_SHA.Substring(0,7)
           $runNum = $env:GITHUB_RUN_NUMBER
           $zipFile = "artifacts/ForcePlateDevTool-CI-$runNum-$shortSha.zip"
