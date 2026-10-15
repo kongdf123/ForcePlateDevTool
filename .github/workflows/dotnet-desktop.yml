@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -59,10 +61,18 @@ jobs:
         run: |
           $publishDir = "artifacts/ci-publish"
 
-          # compute a short sha and run number for artifact naming (do this in PowerShell, not in GitHub expression syntax)
+          # compute a short sha, run number, and latest tag for artifact naming
           $shortSha = $env:GITHUB_SHA.Substring(0,7)
           $runNum = $env:GITHUB_RUN_NUMBER
-          $zipFile = "artifacts/ForcePlateDevTool-CI-$runNum-$shortSha.zip"
+
+          $latestTag = git describe --tags --abbrev=0 2>$null
+          if (-not $latestTag) {
+            Write-Host "No tags found, falling back to v0.0.0"
+            $latestTag = "v0.0.0"
+          }
+          Write-Host "Latest tag: $latestTag"
+
+          $zipFile = "artifacts/ForcePlateDevTool-$latestTag-CI-$runNum-$shortSha.zip"
 
           Write-Host "Publish output: $publishDir"
           New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
@@ -84,11 +94,12 @@ jobs:
           }
 
           echo "CI_ARTIFACT=$zipFile" | Out-File $env:GITHUB_ENV -Append
+          echo "CI_LATEST_TAG=$latestTag" | Out-File $env:GITHUB_ENV -Append
 
       - name: Upload CI package (Release only)
         if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
-          name: ForcePlateDevTool-CI-${{ github.run_number }}
+          name: ForcePlateDevTool-${{ env.CI_LATEST_TAG }}.zip
           path: ${{ env.CI_ARTIFACT }}
           if-no-files-found: error
