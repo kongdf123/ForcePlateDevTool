@@ -107,37 +107,71 @@ jobs:
             "See VERSION.txt for build and source information."
           ) | Set-Content "$publishDir/README.txt" -Encoding utf8
 
-      - name: Create ZIP and SHA-256 checksum
+      - name: Build installer, ZIP, and SHA-256 checksums
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force artifacts | Out-Null
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install Inno Setup"
+          }
 
-          $zip = "artifacts/ForcePlateDevTool-v$($env:RELEASE_VERSION)-win-x64.zip"
-          Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found: $iscc"
+          }
 
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-          "$hash  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ascii
+          & $iscc "installer/ForcePlateDevTool.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer compilation failed"
+          }
+
+          $version = $env:RELEASE_VERSION
+          $zip = "artifacts/ForcePlateDevTool-v$version-win-x64.zip"
+          $setup = "artifacts/ForcePlateDevTool-Setup-v$version.exe"
+
+          Compress-Archive `
+            -Path "artifacts/publish/*" `
+            -DestinationPath $zip `
+            -CompressionLevel Optimal
+
+          if (-not (Test-Path $setup)) {
+            throw "Installer output not found: $setup"
+          }
+
+          foreach ($file in @($zip, $setup)) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash
+            "$hash  $(Split-Path $file -Leaf)" |
+              Set-Content "$file.sha256" -Encoding ascii
+          }
 
           "RELEASE_ZIP=$zip" | Out-File $env:GITHUB_ENV -Append
-          "RELEASE_CHECKSUM=$zip.sha256" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_SETUP=$setup" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_ZIP_CHECKSUM=$zip.sha256" |
+            Out-File $env:GITHUB_ENV -Append
+          "RELEASE_SETUP_CHECKSUM=$setup.sha256" |
+            Out-File $env:GITHUB_ENV -Append
 
-      - name: Upload release ZIP as Actions artifact
+      - name: Upload release packages as Actions artifact
         uses: actions/upload-artifact@v4
         with:
           name: ForcePlateDevTool-v${{ env.RELEASE_VERSION }}-win-x64
           path: |
             ${{ env.RELEASE_ZIP }}
-            ${{ env.RELEASE_CHECKSUM }}
+            ${{ env.RELEASE_ZIP_CHECKSUM }}
+            ${{ env.RELEASE_SETUP }}
+            ${{ env.RELEASE_SETUP_CHECKSUM }}
           if-no-files-found: error
 
-      - name: Publish private GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           gh release create $env:RELEASE_TAG `
+            "$env:RELEASE_SETUP" `
+            "$env:RELEASE_SETUP_CHECKSUM" `
             "$env:RELEASE_ZIP" `
-            "$env:RELEASE_CHECKSUM" `
+            "$env:RELEASE_ZIP_CHECKSUM" `
             --verify-tag `
             --title "ForcePlateDevTool $env:RELEASE_VERSION" `
             --generate-notes

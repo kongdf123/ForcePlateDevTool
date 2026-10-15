@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Net.Http;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -11,6 +12,7 @@ using KW.Sensor.DataModel;
 
 using ForcePlateDevTool.Models;
 using ForcePlateDevTool.Services;
+using ForcePlateDevTool.Windows;
 
 namespace ForcePlateDevTool
 {
@@ -40,6 +42,10 @@ namespace ForcePlateDevTool
 
         private readonly BoundedQueue<ForceSample> _pendingForceSamples =
             new(capacity: 5000);
+
+        private readonly UpdateChecker _updateChecker = new();
+        private bool _isCheckingForUpdates;
+        private UpdateNotificationWindow? _updateWindow;
 
         private long _byteCount;
         private long _frameCount;
@@ -122,6 +128,11 @@ namespace ForcePlateDevTool
             SetStage(TxtDecodeStageStatus, "等待解码", Brushes.Gray);
 
             SetConnectionSettingsEnabled(true);
+
+            Loaded += async (_, _) =>
+            {
+                await CheckForUpdatesAsync(manual: false);
+            };
         }
 
         private static void SetStage(TextBlock target, string message, Brush color)
@@ -787,6 +798,96 @@ namespace ForcePlateDevTool
         private void BtnClearLog_Click(object sender, RoutedEventArgs e)
         {
             TxtLog.Clear();
+        }
+
+        private async void BtnCheckUpdates_Click(
+            object sender,
+            RoutedEventArgs e)
+        {
+            await CheckForUpdatesAsync(manual: true);
+        }
+
+        private async Task CheckForUpdatesAsync(bool manual)
+        {
+            if (_isCheckingForUpdates ||
+                (_updateWindow is { IsVisible: true }))
+            {
+                return;
+            }
+
+            _isCheckingForUpdates = true;
+            BtnCheckUpdates.IsEnabled = false;
+
+            try
+            {
+                var currentVersion = AppVersionInfo.Current.Version;
+
+                var release = await _updateChecker.CheckForUpdateAsync(
+                    currentVersion);
+
+                if (release is null)
+                {
+                    if (manual)
+                    {
+                        MessageBox.Show(
+                            "当前没有检测到比已安装稳定版本更新的版本。",
+                            "检查更新",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Information);
+                    }
+
+                    return;
+                }
+
+                if (!manual && UpdatePreferences.IsSkipped(release.TagName))
+                    return;
+
+                _updateWindow = new UpdateNotificationWindow(release)
+                {
+                    Owner = this
+                };
+
+                _updateWindow.Closed += (_, _) => _updateWindow = null;
+                _updateWindow.Show();
+            }
+            catch (OperationCanceledException)
+            {
+                if (manual)
+                {
+                    MessageBox.Show(
+                        "检查更新已取消。",
+                        "检查更新",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                if (manual)
+                {
+                    MessageBox.Show(
+                        $"暂时无法连接 GitHub 检查更新。\n{ex.Message}",
+                        "检查更新失败",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (manual)
+                {
+                    MessageBox.Show(
+                        $"检查更新失败：{ex.Message}",
+                        "检查更新失败",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+            }
+            finally
+            {
+                _isCheckingForUpdates = false;
+                BtnCheckUpdates.IsEnabled = true;
+            }
         }
     }
 }

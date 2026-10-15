@@ -102,6 +102,11 @@
             <StackPanel Grid.Column="1"
                         Orientation="Horizontal"
                         VerticalAlignment="Center">
+                <Button x:Name="BtnCheckUpdates"
+                        Content="检查更新"
+                        Click="BtnCheckUpdates_Click"
+                        Margin="0,0,16,0"
+                        ToolTip="检查是否有新版本"/>
                 <TextBlock Text="连接状态"
                            VerticalAlignment="Center"
                            Foreground="{StaticResource MutedBrush}"

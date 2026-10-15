@@ -1,0 +1,673 @@
+I reviewed the current ForcePlateDevTool source and mapped the installer/update implementation to its existing WPF structure and GitHub Actions release workflow.
+One limitation: the connected GitHub integration denied permission to create a feature branch, so I have not committed changes to your repository. Below are the concrete code changes I propose. They preserve the existing portable ZIP, add an installer, and implement user-controlled update notifications without interrupting force-plate acquisition.
+1. Proposed file changes
+File	Change
+installer/ForcePlateDevTool.iss	New Inno Setup installer; supports per-user and all-users installation
+src/ForcePlateDevTool/Services/UpdateChecker.cs	New GitHub Releases update checker
+src/ForcePlateDevTool/Services/UpdatePreferences.cs	New per-user setting for skipping a release
+src/ForcePlateDevTool/Windows/UpdateNotificationWindow.xaml	New update-notification window
+src/ForcePlateDevTool/Windows/UpdateNotificationWindow.xaml.cs	Download, remind-later, and skip-version actions
+src/ForcePlateDevTool/MainWindow.xaml	Add a “检查更新” button
+src/ForcePlateDevTool/MainWindow.xaml.cs	Start a background check and handle manual checks
+.github/workflows/release.yml	Build the installer and publish checksums for both packages
+tests/ForcePlateDevTool.Tests/Services/UpdateCheckerTests.cs	Test version comparison and release-tag validation
+2. Update checker
+Create src/ForcePlateDevTool/Services/UpdateChecker.cs.
+The checker uses the public GitHub Releases API, compares stable versions, and finds the matching installer asset. It does not need a token embedded in the application.
+
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+
+namespace ForcePlateDevTool.Services;
+
+public sealed record UpdateRelease(
+    string TagName,
+    string Version,
+    string ReleaseUrl,
+    string ReleaseNotes,
+    string? InstallerUrl);
+
+public sealed class UpdateChecker
+{
+    private const string LatestReleaseApi =
+        "https://api.github.com/repos/kongdf123/ForcePlateDevTool/releases/latest";
+
+    private static readonly HttpClient SharedClient = CreateClient();
+    private readonly HttpClient _httpClient;
+
+    public UpdateChecker(HttpClient? httpClient = null)
+    {
+        _httpClient = httpClient ?? SharedClient;
+    }
+
+    private static HttpClient CreateClient()
+    {
+        var client = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+
+        client.DefaultRequestHeaders.UserAgent.Add(
+            new ProductInfoHeaderValue("ForcePlateDevTool", "1.0"));
+
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+
+        return client;
+    }
+
+    public async Task<UpdateRelease?> CheckForUpdateAsync(
+        string installedVersion,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await _httpClient.GetAsync(
+            LatestReleaseApi, cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        await using var stream =
+            await response.Content.ReadAsStreamAsync(cancellationToken);
+
+        using var json = await JsonDocument.ParseAsync(
+            stream, cancellationToken: cancellationToken);
+
+        var root = json.RootElement;
+
+        if (root.TryGetProperty("draft", out var draft) &&
+            draft.GetBoolean())
+        {
+            return null;
+        }
+
+        if (root.TryGetProperty("prerelease", out var prerelease) &&
+            prerelease.GetBoolean())
+        {
+            return null;
+        }
+
+        string tag = root.GetProperty("tag_name").GetString() ?? "";
+        if (!TryParseStableVersion(tag, out var latestVersion))
+            return null;
+
+        // Release builds may append "+<commit>" to the informational version.
+        if (!TryParseStableVersion(installedVersion, out var currentVersion))
+            return null;
+
+        if (latestVersion <= currentVersion)
+            return null;
+
+        string releaseUrl =
+            root.GetProperty("html_url").GetString()
+            ?? "https://github.com/kongdf123/ForcePlateDevTool/releases";
+
+        string notes = root.TryGetProperty("body", out var body)
+            ? body.GetString() ?? ""
+            : "";
+
+        string? installerUrl = null;
+
+        if (root.TryGetProperty("assets", out var assets))
+        {
+            foreach (var asset in assets.EnumerateArray())
+            {
+                string name = asset.GetProperty("name").GetString() ?? "";
+
+                if (name.Equals(
+                    $"ForcePlateDevTool-Setup-{tag}.exe",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    installerUrl =
+                        asset.GetProperty("browser_download_url").GetString();
+                    break;
+                }
+            }
+        }
+
+        return new UpdateRelease(
+            tag,
+            latestVersion.ToString(3),
+            releaseUrl,
+            notes,
+            installerUrl);
+    }
+
+    public static bool TryParseStableVersion(
+        string value,
+        out Version version)
+    {
+        version = new Version(0, 0, 0);
+
+        // Accept v1.2.3 and 1.2.3, with optional build metadata.
+        // Reject prereleases such as 1.2.3-rc.1.
+        var match = Regex.Match(
+            value.Trim(),
+            @"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?$");
+
+        if (!match.Success)
+            return false;
+
+        return Version.TryParse(
+            $"{match.Groups[1].Value}.{match.Groups[2].Value}.{match.Groups[3].Value}",
+            out version!);
+    }
+}
+
+
+
+Important behavior: if the GitHub API is unreachable, the exception is handled by the UI. The application must continue working normally; update checking must never be a prerequisite for connecting to the device.
+3. Persist the “skip this version” preference
+Create src/ForcePlateDevTool/Services/UpdatePreferences.cs.
+This stores the dismissed version under the current Windows user profile. It does not write into the installation directory, so a non-admin user can use it and upgrades will not overwrite it.
+
+namespace ForcePlateDevTool.Services;
+
+public static class UpdatePreferences
+{
+    private static readonly string SettingsDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ForcePlateDevTool");
+
+    private static readonly string SkippedVersionPath =
+        Path.Combine(SettingsDirectory, "SkippedUpdateVersion.txt");
+
+    public static bool IsSkipped(string tag)
+    {
+        try
+        {
+            return File.Exists(SkippedVersionPath) &&
+                string.Equals(
+                    File.ReadAllText(SkippedVersionPath).Trim(),
+                    tag,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    public static void Skip(string tag)
+    {
+        try
+        {
+            Directory.CreateDirectory(SettingsDirectory);
+            File.WriteAllText(SkippedVersionPath, tag);
+        }
+        catch (IOException)
+        {
+            // A preference failure must not affect device diagnostics.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Keep the application usable even if preferences cannot be saved.
+        }
+    }
+}
+
+
+
+4. Add the update-notification window
+Create src/ForcePlateDevTool/Windows/UpdateNotificationWindow.xaml.
+
+<Window x:Class="ForcePlateDevTool.Windows.UpdateNotificationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="发现新版本"
+        Width="620" Height="460"
+        MinWidth="520" MinHeight="360"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="ForcePlateDevTool 有可用更新"
+                   FontSize="20"
+                   FontWeight="Bold"/>
+
+        <TextBlock x:Name="TxtVersion"
+                   Grid.Row="1"
+                   Margin="0,10,0,12"
+                   TextWrapping="Wrap"/>
+
+        <GroupBox Grid.Row="2" Header="Release notes">
+            <TextBox x:Name="TxtReleaseNotes"
+                     IsReadOnly="True"
+                     BorderThickness="0"
+                     Background="Transparent"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Disabled"/>
+        </GroupBox>
+
+        <StackPanel Grid.Row="3"
+                    Margin="0,14,0,0"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right">
+            <Button Content="不再提醒此版本"
+                    Click="SkipVersion_Click"/>
+            <Button Content="稍后提醒"
+                    Click="RemindLater_Click"/>
+            <Button Content="前往下载"
+                    IsDefault="True"
+                    Click="Download_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
+
+
+
+Create src/ForcePlateDevTool/Windows/UpdateNotificationWindow.xaml.cs.
+
+using System.Diagnostics;
+using System.Windows;
+using ForcePlateDevTool.Services;
+
+namespace ForcePlateDevTool.Windows;
+
+public partial class UpdateNotificationWindow : Window
+{
+    private readonly UpdateRelease _release;
+
+    public UpdateNotificationWindow(UpdateRelease release)
+    {
+        InitializeComponent();
+
+        _release = release;
+        TxtVersion.Text = $"当前版本：{AppVersionInfo.Current.Version}\n" +
+                          $"最新版本：{release.Version}";
+        TxtReleaseNotes.Text = string.IsNullOrWhiteSpace(release.ReleaseNotes)
+            ? "该版本没有提供更新说明。"
+            : release.ReleaseNotes;
+    }
+
+    private void Download_Click(object sender, RoutedEventArgs e)
+    {
+        // Open the official installer asset when present; otherwise open
+        // the official release page, which also contains the portable ZIP.
+        string url = _release.InstallerUrl ?? _release.ReleaseUrl;
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(url)
+            {
+                UseShellExecute = true
+            });
+            Close();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"无法打开下载链接：{ex.Message}\n\n{_release.ReleaseUrl}",
+                "打开下载链接失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    private void RemindLater_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
+    private void SkipVersion_Click(object sender, RoutedEventArgs e)
+    {
+        UpdatePreferences.Skip(_release.TagName);
+        Close();
+    }
+}
+
+
+
+The notification window is non-modal: users can leave it open or dismiss it without blocking the diagnostic interface. The app only opens a browser download; it does not silently install, restart, or close the running application.
+5. Connect the update checker to MainWindow
+The existing main window already imports ForcePlateDevTool.Services, so only a small amount of integration code is needed.
+MainWindow.xaml
+In the header's right-hand StackPanel (the one currently displaying 连接状态), add this button before the connection-status label:
+<Button x:Name="BtnCheckUpdates"
+        Content="检查更新"
+        Click="BtnCheckUpdates_Click"
+        Margin="0,0,16,0"
+        ToolTip="检查是否有新版本"/>
+
+
+MainWindow.xaml.cs
+Add this namespace:
+using ForcePlateDevTool.Windows;
+
+
+Add the following fields to MainWindow:
+private readonly UpdateChecker _updateChecker = new();
+private bool _isCheckingForUpdates;
+private UpdateNotificationWindow? _updateWindow;
+
+
+At the end of the constructor, after SetConnectionSettingsEnabled(true);, add a non-blocking startup check:
+Loaded += async (_, _) =>
+{
+    await CheckForUpdatesAsync(manual: false);
+};
+
+
+Then add the following methods inside MainWindow:
+
+private async void BtnCheckUpdates_Click(
+    object sender,
+    RoutedEventArgs e)
+{
+    await CheckForUpdatesAsync(manual: true);
+}
+
+private async Task CheckForUpdatesAsync(bool manual)
+{
+    if (_isCheckingForUpdates ||
+        (_updateWindow is { IsVisible: true }))
+    {
+        return;
+    }
+
+    _isCheckingForUpdates = true;
+    BtnCheckUpdates.IsEnabled = false;
+
+    try
+    {
+        var currentVersion = AppVersionInfo.Current.Version;
+
+        var release = await _updateChecker.CheckForUpdateAsync(
+            currentVersion);
+
+        if (release is null)
+        {
+            if (manual)
+            {
+                MessageBox.Show(
+                    "当前没有检测到比已安装稳定版本更新的版本。",
+                    "检查更新",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+
+            return;
+        }
+
+        // Skip-version preference suppresses automatic prompts only.
+        // A user-triggered manual check can still show the release.
+        if (!manual && UpdatePreferences.IsSkipped(release.TagName))
+            return;
+
+        _updateWindow = new UpdateNotificationWindow(release)
+        {
+            Owner = this
+        };
+
+        _updateWindow.Closed += (_, _) => _updateWindow = null;
+        _updateWindow.Show();
+    }
+    catch (OperationCanceledException)
+    {
+        // An interrupted request should not affect diagnostics.
+        if (manual)
+        {
+            MessageBox.Show(
+                "检查更新已取消。",
+                "检查更新",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+    }
+    catch (HttpRequestException ex)
+    {
+        if (manual)
+        {
+            MessageBox.Show(
+                $"暂时无法连接 GitHub 检查更新。\n{ex.Message}",
+                "检查更新失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+    catch (Exception ex)
+    {
+        if (manual)
+        {
+            MessageBox.Show(
+                $"检查更新失败：{ex.Message}",
+                "检查更新失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+    finally
+    {
+        _isCheckingForUpdates = false;
+        BtnCheckUpdates.IsEnabled = true;
+    }
+}
+
+
+
+One compile-safe refinement for the TryParseStableVersion method in section 2: replace its final Version.TryParse(..., out version!) statement with this:
+if (Version.TryParse(
+        $"{match.Groups[1].Value}.{match.Groups[2].Value}.{match.Groups[3].Value}",
+        out var parsed) &&
+    parsed is not null)
+{
+    version = parsed;
+    return true;
+}
+
+return false;
+
+
+This ensures the nullable Version result is handled explicitly.
+6. Add the Inno Setup installer
+Create installer/ForcePlateDevTool.iss.
+This supports both installation modes: per-user installation without administrator privileges, and all-users installation with administrator privileges. The user can choose the mode in the installer.
+
+#define MyAppName "ForcePlateDevTool"
+#define MyAppVersion GetEnv("RELEASE_VERSION")
+#define MyAppPublisher "Kunwei"
+#define MyAppExeName "ForcePlateDevTool.exe"
+
+#if MyAppVersion == ""
+  #error "RELEASE_VERSION must be set before compiling the installer."
+#endif
+
+[Setup]
+AppId={{A2C5D5C1-6A41-4B91-A8D2-5A62A1F79E10}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+
+DefaultDirName={autopf}\ForcePlateDevTool
+DefaultGroupName=ForcePlateDevTool
+
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=dialog
+
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
+
+UninstallDisplayIcon={app}\ForcePlateDevTool.exe
+OutputDir=..\artifacts
+OutputBaseFilename=ForcePlateDevTool-Setup-v{#MyAppVersion}
+
+WizardStyle=modern
+Compression=lzma2
+SolidCompression=yes
+CloseApplications=yes
+RestartApplications=no
+Uninstallable=yes
+
+[Tasks]
+Name: "desktopicon"; \
+    Description: "Create a desktop shortcut"; \
+    GroupDescription: "Additional shortcuts:"; \
+    Flags: unchecked
+
+[Files]
+Source: "..\artifacts\publish\*"; \
+    DestDir: "{app}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\ForcePlateDevTool"; \
+    Filename: "{app}\{#MyAppExeName}"
+
+Name: "{autodesktop}\ForcePlateDevTool"; \
+    Filename: "{app}\{#MyAppExeName}"; \
+    Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; \
+    Description: "Launch ForcePlateDevTool"; \
+    Flags: postinstall nowait skipifsilent
+
+
+
+The installer should not delete diagnostic configuration, calibration data, or logs from %LOCALAPPDATA%. Before finalizing, verify where the current application actually stores those files and ensure uninstall does not remove user data.
+7. Extend the release workflow
+Edit .github/workflows/release.yml.
+Keep the existing tag validation, dotnet restore, tests, and self-contained Windows x64 publish steps. Replace the existing “Create ZIP and SHA-256 checksum” step with the following:
+
+      - name: Build installer, ZIP, and SHA-256 checksums
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install Inno Setup"
+          }
+
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found: $iscc"
+          }
+
+          & $iscc "installer/ForcePlateDevTool.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer compilation failed"
+          }
+
+          $version = $env:RELEASE_VERSION
+          $zip = "artifacts/ForcePlateDevTool-v$version-win-x64.zip"
+          $setup = "artifacts/ForcePlateDevTool-Setup-v$version.exe"
+
+          Compress-Archive `
+            -Path "artifacts/publish/*" `
+            -DestinationPath $zip `
+            -CompressionLevel Optimal
+
+          if (-not (Test-Path $setup)) {
+            throw "Installer output not found: $setup"
+          }
+
+          foreach ($file in @($zip, $setup)) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash
+            "$hash  $(Split-Path $file -Leaf)" |
+              Set-Content "$file.sha256" -Encoding ascii
+          }
+
+          "RELEASE_ZIP=$zip" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_SETUP=$setup" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_ZIP_CHECKSUM=$zip.sha256" |
+            Out-File $env:GITHUB_ENV -Append
+          "RELEASE_SETUP_CHECKSUM=$setup.sha256" |
+            Out-File $env:GITHUB_ENV -Append
+
+
+
+Then update the Actions artifact upload step to include all four files:
+      - name: Upload release packages as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForcePlateDevTool-v${{ env.RELEASE_VERSION }}-win-x64
+          path: |
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.RELEASE_ZIP_CHECKSUM }}
+            ${{ env.RELEASE_SETUP }}
+            ${{ env.RELEASE_SETUP_CHECKSUM }}
+          if-no-files-found: error
+
+
+Finally, update the existing GitHub Release step so that it attaches the installer as well as the portable ZIP:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG `
+            "$env:RELEASE_SETUP" `
+            "$env:RELEASE_SETUP_CHECKSUM" `
+            "$env:RELEASE_ZIP" `
+            "$env:RELEASE_ZIP_CHECKSUM" `
+            --verify-tag `
+            --title "ForcePlateDevTool $env:RELEASE_VERSION" `
+            --generate-notes
+
+
+The release will contain these assets:
+- ForcePlateDevTool-Setup-vX.Y.Z.exe
+- ForcePlateDevTool-Setup-vX.Y.Z.exe.sha256
+- ForcePlateDevTool-vX.Y.Z-win-x64.zip
+- ForcePlateDevTool-vX.Y.Z-win-x64.zip.sha256
+The update checker expects the installer name to match ForcePlateDevTool-Setup-DIL1.exe, where the tag includes its leading v. Keep those names synchronized.
+8. Add tests for release-version handling
+Create tests/ForcePlateDevTool.Tests/Services/UpdateCheckerTests.cs.
+<CodeBlock language="csharp" editable>
+using ForcePlateDevTool.Services;
+
+namespace ForcePlateDevTool.Tests.Services;
+public class UpdateCheckerTests
+{
+[Theory]
+[InlineData("v1.2.3", true)]
+[InlineData("1.2.3", true)]
+[InlineData("v1.2.3+abcdef0", true)]
+[InlineData("v1.2.3-rc.1", false)]
+[InlineData("v1.2", false)]
+[InlineData("latest", false)]
+[InlineData("", false)]
+public void TryParseStableVersion_ValidatesExpectedFormats(
+string input,
+bool expected)
+{
+bool result = UpdateChecker.TryParseStableVersion(
+input, out var version);
+Assert.Equal(expected, result);
+if (expected)
+Assert.NotNull(version);
+}
+}
+</CodeBlock>
+9. Build and release validation
+Before publishing a new release, run the existing tests and verify the installer workflow on Windows:
+dotnet restore ForcePlateDevTool.sln
+dotnet test ForcePlateDevTool.sln --configuration Release --no-restore
+dotnet publish src/ForcePlateDevTool/ForcePlateDevTool.csproj `
+  --configuration Release `
+  --runtime win-x64 `
+  --self-contained true `
+  --output artifacts/publish
+
+
+Set RELEASE_VERSION before compiling installer/ForcePlateDevTool.iss, then test the installer in both per-user and all-users modes.
+Also verify these scenarios manually:
+1. The application starts and connects to the force plate when GitHub is unavailable.
+2. Startup checks do not freeze the WPF interface or delay acquisition.
+3. An available update opens the official installer download or release page.
+4. “稍后提醒” dismisses the notification; “不再提醒此版本” suppresses that version on future automatic checks.
+5. Installing an upgrade preserves user configuration, calibration data, and logs.
+6. The portable ZIP remains usable independently of the installer.
+7. Uninstalling the application does not unexpectedly delete user data.
+Status: These are proposed source changes, not a completed repository commit. I have not run the build or tests, and the current GitHub connection prevented me from opening a branch or pull request. I recommend applying these changes on a feature branch and waiting for CI to pass before tagging the next release.

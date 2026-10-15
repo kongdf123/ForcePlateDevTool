@@ -1,0 +1,184 @@
+# Task: Add Windows Installer and Update Notifications to ForcePlateDevTool
+
+## Repository and current architecture
+
+Repository: `https://github.com/kongdf123/ForcePlateDevTool`
+
+- Branch: `main`
+- Application: WPF, C#, .NET 8, Windows x64
+- Project: `src/ForcePlateDevTool/ForcePlateDevTool.csproj`
+- Release workflow: `.github/workflows/release.yml`
+- CI workflow: `.github/workflows/dotnet-desktop.yml`
+- Current release format: Git-tag-triggered GitHub Actions workflow, self-contained Windows x64 publish, portable ZIP, SHA-256 checksum.
+- Latest published version observed: `v1.2.1`.
+
+Implement the following features. Inspect the existing application architecture, configuration handling, and release workflow before making changes. Do not replace existing functionality or hardware communication code.
+
+## 1. Generate a Windows installer using Inno Setup
+
+Create `installer/ForcePlateDevTool.iss`.
+
+Requirements:
+
+1. Package the output from the existing self-contained .NET publish directory: `artifacts/publish/`.
+2. Generate an installer named `ForcePlateDevTool-Setup-v{version}.exe`.
+3. Support both installation modes:
+   - Per-user installation without administrator rights.
+   - All-users installation with administrator authorization.
+4. Use Inno Setup installation-mode overrides and an appropriate automatic Program Files/user Programs directory constant.
+5. Create a Start Menu shortcut and offer an optional desktop shortcut.
+6. Offer to launch the application after installation.
+7. Register an uninstaller.
+8. Preserve the same Inno Setup `AppId` across releases.
+9. Configure x64 installation appropriately.
+10. Ensure upgrading from an earlier installed version does not delete user settings or logs.
+
+Recommended installation paths:
+
+- Per-user: `%LOCALAPPDATA%\Programs\ForcePlateDevTool`
+- All-users: `%ProgramFiles%\ForcePlateDevTool`
+
+Recommended Inno Setup settings:
+
+- `PrivilegesRequired=admin`
+- `PrivilegesRequiredOverridesAllowed=dialog`
+- `DefaultDirName={autopf}\ForcePlateDevTool`
+- `ArchitecturesInstallIn64BitMode=x64`
+
+Use a stable application ID, for example:
+
+`{{A2C5D5C1-6A41-4B91-A8D2-5A62A1F79E10}`
+
+Use Inno Setup preprocessor definitions to pass the release version from the workflow. Do not hard-code the production version in the installer script.
+
+## 2. Extend the release workflow
+
+Update `.github/workflows/release.yml`.
+
+Keep the existing release validation, .NET restore, tests, self-contained publish, and portable ZIP.
+
+After publishing the application:
+
+1. Install Inno Setup on the Windows GitHub Actions runner.
+2. Compile `installer/ForcePlateDevTool.iss` using `ISCC.exe`.
+3. Pass the validated `RELEASE_VERSION` to the installer compiler.
+4. Fail the workflow if installer compilation fails or the expected output file is missing.
+5. Generate SHA-256 checksums for both the installer and ZIP.
+6. Upload the installer, its checksum, the portable ZIP, and its checksum to the same GitHub Release.
+7. Keep version numbers and artifact names consistent.
+8. Preserve the existing tag validation rules and CI behavior.
+
+Expected assets for version `1.2.2`:
+
+- `ForcePlateDevTool-Setup-v1.2.2.exe`
+- `ForcePlateDevTool-Setup-v1.2.2.exe.sha256`
+- `ForcePlateDevTool-v1.2.2-win-x64.zip`
+- `ForcePlateDevTool-v1.2.2-win-x64.zip.sha256`
+
+Do not publish a release automatically from ordinary commits to `main`. Continue to publish only when a valid release tag triggers the release workflow.
+
+## 3. Add an update-checking service
+
+Create a small, testable service, such as `Services/UpdateService.cs`. Adapt its namespace and location to the existing project structure.
+
+The GitHub repository is currently public. Use the unauthenticated GitHub Releases API:
+
+`https://api.github.com/repos/kongdf123/ForcePlateDevTool/releases/latest`
+
+Use `HttpClient` with a reasonable timeout and appropriate error handling.
+
+Retrieve at least:
+
+- `tag_name`
+- `html_url`
+- `body`
+- `prerelease`
+- `draft`
+- Installer asset download URL, when present
+
+Behavior:
+
+1. Ignore draft and prerelease versions.
+2. Parse stable semantic versions correctly, including the leading `v` in release tags.
+3. Compare the latest release version with the installed application version.
+4. Prefer the matching `ForcePlateDevTool-Setup-v{version}.exe` asset.
+5. If the installer asset is missing, offer to open the GitHub release page instead.
+6. Never embed a personal access token or other secret in the application.
+7. Handle offline, timeout, rate-limit, malformed-response, and server-error conditions gracefully.
+8. A failed update check must never prevent the application from starting or connecting to hardware.
+9. Make the service unit-testable, with the HTTP dependency injectable.
+
+Determine the installed version from the assembly metadata already set by the release workflow. Handle development builds such as `0.1.0-dev` explicitly so they are not incorrectly treated as production releases.
+
+## 4. Add WPF update notifications
+
+Integrate the update service into the existing WPF UI without blocking application startup.
+
+Required UI:
+
+- Display the installed version in an appropriate About or Settings area.
+- Add a `Check for Updates` command under Help or an existing equivalent menu.
+- Show a non-modal notification when a newer stable version is available.
+- Display the installed version, latest version, release notes, and a `Download Update` action.
+- Provide `Remind Me Later` or `Dismiss`.
+- Open the official GitHub release or installer asset using the operating system's default browser.
+- Do not download and install updates silently.
+- Do not restart the application automatically.
+- Do not interrupt an active measurement or force-plate acquisition workflow.
+
+Automatic checks should run asynchronously after startup. Check at most once per application session initially; optionally support a 24-hour interval later.
+
+Persist a dismissed-version value using an existing suitable settings mechanism, or a per-user settings file under `%LOCALAPPDATA%`. Do not write user settings into `Program Files` or the installation directory.
+
+A failed network request should be logged appropriately without showing a disruptive error dialog during startup.
+
+## 5. Preserve configuration and hardware behavior
+
+Inspect the existing code to identify where application settings, logs, calibration data, and device configuration are stored.
+
+- Do not delete these files during upgrades or uninstall.
+- Do not migrate or rename settings unless necessary and explicitly tested.
+- Do not change force-plate network communication, camera/device integration, measurement logic, or data formats as part of this task.
+- Ensure the application can run from both an installed directory and the existing portable ZIP.
+- Ensure the update checker is optional and has no dependency on a successful network connection.
+
+## 6. Tests and validation
+
+Add tests where appropriate for:
+
+- Version parsing and comparison.
+- Stable versus prerelease release filtering.
+- No-update and update-available cases.
+- Missing installer asset.
+- Network timeout, offline mode, and invalid API responses.
+- Development-build version handling.
+
+Validate the following manually on clean Windows x64 environments:
+
+1. Per-user installation without administrator rights.
+2. All-users installation with administrator authorization.
+3. Start Menu and optional desktop shortcuts.
+4. Launch after installation.
+5. Upgrade an existing installation to a newer version.
+6. Preservation of configuration, logs, and hardware settings.
+7. Uninstallation.
+8. Running the portable ZIP.
+9. Force-plate connectivity and normal measurement behavior after installation.
+10. Update notification, release-page opening, and network failure behavior.
+
+Run the existing solution tests and CI checks. Do not claim the installer is production-ready until installation and upgrade tests have passed.
+
+## 7. Deliverables
+
+Submit:
+
+- `installer/ForcePlateDevTool.iss`
+- Updated `.github/workflows/release.yml`
+- Update-checking service and related models
+- WPF update notification integration
+- Unit tests
+- Any minimal documentation needed for building and testing the installer
+
+Provide a summary of changed files, design decisions, build/test results, and remaining manual verification steps.
+
+Do not create or publish a release tag as part of this implementation task. Keep code changes reviewable and separate from the production release operation.
