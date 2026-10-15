@@ -12,6 +12,10 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  INNO_SETUP_VERSION: "6.4.0"
+  TIMESTAMP_URL: "http://timestamp.digicert.com"
+
 jobs:
   release:
     name: Build and publish Windows x64 release
@@ -121,14 +125,12 @@ jobs:
             "See VERSION.txt for build and source information."
           ) | Set-Content "$publishDir/README.txt" -Encoding utf8
 
-      - name: Build installer, ZIP, and SHA-256 checksums
+      - name: Install pinned Inno Setup
         shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
         run: |
-          choco install innosetup --no-progress -y
+          choco install innosetup --version="$env:INNO_SETUP_VERSION" --no-progress -y
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install Inno Setup"
+            throw "Failed to install pinned Inno Setup $env:INNO_SETUP_VERSION"
           }
 
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
@@ -136,47 +138,127 @@ jobs:
             throw "Inno Setup compiler not found: $iscc"
           }
 
+          "ISCC=$iscc" | Out-File $env:GITHUB_ENV -Append
+
+          Write-Host "Inno Setup version pinned to $env:INNO_SETUP_VERSION"
+          Write-Host "ISCC compiler path: $iscc"
+          (Get-Item $iscc).VersionInfo | Select-Object FileVersion, ProductVersion | Format-List
+
+      - name: Sign primary application EXE
+        shell: pwsh
+        env:
+          CODE_SIGN_PFX: ${{ secrets.CODE_SIGN_PFX }}
+          CODESIGN_PASSWORD: ${{ secrets.CODESIGN_PASSWORD }}
+        run: |
+          $appExe = "artifacts/publish/ForcePlateDevTool.exe"
+          if (-not (Test-Path $appExe)) {
+            throw "Application EXE not found for signing: $appExe"
+          }
+
+          if (-not $env:CODE_SIGN_PFX -or -not $env:CODESIGN_PASSWORD) {
+            Write-Host "Code signing secrets not configured; skipping app signing."
+            "SIGNING_ENABLED=false" | Out-File $env:GITHUB_ENV -Append
+            return
+          }
+
+          "SIGNING_ENABLED=true" | Out-File $env:GITHUB_ENV -Append
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $signtool) {
+            throw "SignTool not found under Windows Kits"
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX))
+
+          try {
+            & $signtool sign `
+              /f $pfxPath `
+              /p $env:CODESIGN_PASSWORD `
+              /fd SHA256 `
+              /tr $env:TIMESTAMP_URL `
+              /td SHA256 `
+              $appExe
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Application signing failed"
+            }
+
+            & $signtool verify /pa /v $appExe
+            if ($LASTEXITCODE -ne 0) {
+              throw "Application signature verification failed"
+            }
+          } finally {
+            Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+          "SIGNTOOL=$signtool" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Build installer, ZIP, and SHA-256 checksums
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          CODE_SIGN_PFX: ${{ secrets.CODE_SIGN_PFX }}
+          CODESIGN_PASSWORD: ${{ secrets.CODESIGN_PASSWORD }}
+        run: |
+          $version = $env:RELEASE_VERSION
+          $iscc = $env:ISCC
+          $zip = "artifacts/ForcePlateDevTool-v$version-win-x64.zip"
+          $setup = "artifacts/ForcePlateDevTool-Setup-v$version.exe"
+
           Write-Host "Compiling installer with ISCC: $iscc"
           & $iscc "installer/ForcePlateDevTool.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "Installer compilation failed"
           }
 
-          $version = $env:RELEASE_VERSION
-          $zip = "artifacts/ForcePlateDevTool-v$version-win-x64.zip"
-          $setup = "artifacts/ForcePlateDevTool-Setup-v$version.exe"
+          if (-not (Test-Path $setup)) {
+            throw "Installer output not found: $setup"
+          }
+
+          if ($env:SIGNING_ENABLED -eq "true") {
+            $signtool = $env:SIGNTOOL
+            if (-not $signtool) {
+              throw "SignTool path not available for installer signing"
+            }
+
+            $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX))
+
+            try {
+              & $signtool sign `
+                /f $pfxPath `
+                /p $env:CODESIGN_PASSWORD `
+                /fd SHA256 `
+                /tr $env:TIMESTAMP_URL `
+                /td SHA256 `
+                $setup
+
+              if ($LASTEXITCODE -ne 0) {
+                throw "Installer signing failed"
+              }
+
+              & $signtool verify /pa /v $setup
+              if ($LASTEXITCODE -ne 0) {
+                throw "Installer signature verification failed"
+              }
+            } finally {
+              Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
+            }
+          } else {
+            Write-Host "Signing not enabled; installer remains unsigned."
+          }
 
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip -CompressionLevel Optimal
 
           if (-not (Test-Path $zip)) {
             throw "ZIP creation failed: $zip"
-          }
-
-          if (-not (Test-Path $setup)) {
-            throw "Installer output not found: $setup"
-          }
-
-          if ($env:CODE_SIGN_PFX -and $env:CODESIGN_PASSWORD) {
-            Write-Host "Signing installer and primary exe (attempt)."
-            $pfxBase64 = $env:CODE_SIGN_PFX
-            $pfxPath = "artifacts/codesign.pfx"
-            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
-
-            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
-            $cert.Import($pfxPath, $env:CODESIGN_PASSWORD, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
-
-            $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
-            if (-not (Test-Path $signtool)) {
-              Write-Host "signtool not found at $signtool; skipping signing step."
-            } else {
-              & $signtool sign /fd SHA256 /a /f $pfxPath /p $env:CODESIGN_PASSWORD $setup
-              if ($LASTEXITCODE -ne 0) {
-                Write-Host "signtool failed to sign installer (continuing as optional)."
-              }
-            }
-          } else {
-            Write-Host "Code signing not configured; skipping signing step."
           }
 
           foreach ($file in @($zip, $setup)) {
@@ -188,6 +270,51 @@ jobs:
           "RELEASE_SETUP=$setup" | Out-File $env:GITHUB_ENV -Append
           "RELEASE_ZIP_CHECKSUM=$zip.sha256" | Out-File $env:GITHUB_ENV -Append
           "RELEASE_SETUP_CHECKSUM=$setup.sha256" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Scan artifacts with Microsoft Defender
+        shell: pwsh
+        run: |
+          $scanTargets = @(
+            "artifacts/publish/ForcePlateDevTool.exe",
+            $env:RELEASE_SETUP,
+            $env:RELEASE_ZIP
+          ) | Where-Object { Test-Path $_ }
+
+          if ($scanTargets.Count -eq 0) {
+            throw "No scan targets found"
+          }
+
+          $mpCmdRun = "${env:ProgramFiles}\Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mpCmdRun)) {
+            throw "MpCmdRun.exe not found at $mpCmdRun"
+          }
+
+          Write-Host "Updating Defender signatures (best effort)..."
+          try {
+            & $mpCmdRun -SignatureUpdate | Out-Host
+          } catch {
+            Write-Host "Signature update skipped: $($_.Exception.Message)"
+          }
+
+          Write-Host "Running Defender scan on: $($scanTargets -join ', ')"
+          foreach ($target in $scanTargets) {
+            Write-Host "Scanning $target"
+            & $mpCmdRun -Scan -ScanType 3 -File $target
+            $code = $LASTEXITCODE
+            if ($code -ne 0) {
+              throw "Defender scan of $target returned non-zero exit code $code; possible threat detected."
+            }
+            Write-Host "Clean: $target"
+          }
+
+          Write-Host "No Defender threats detected in release artifacts."
+
+          Write-Host "Artifact SHA-256 checksums:"
+          foreach ($file in @($env:RELEASE_SETUP, $env:RELEASE_ZIP)) {
+            if (Test-Path $file) {
+              Write-Host "$((Get-FileHash $file -Algorithm SHA256).Hash)  $(Split-Path $file -Leaf)"
+            }
+          }
 
       - name: Create GitHub release (managed action)
         id: create_release
