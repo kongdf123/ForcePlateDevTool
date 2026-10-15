@@ -42,7 +42,7 @@ Uninstallable=yes
 ; User data must be preserved during upgrade/uninstall.
 
 [Languages]
-Name: "english"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
