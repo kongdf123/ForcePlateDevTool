@@ -174,7 +174,13 @@ jobs:
           }
 
           $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          $pfxBase64 = $env:CODE_SIGN_PFX -replace '\s', ''
+          $pfxBase64 = $env:CODE_SIGN_PFX
+          if ($pfxBase64 -match '(?s)-----BEGIN[^-]*-----(.+?)-----END[^-]*-----') {
+            $pfxBase64 = $Matches[1]
+          }
+          $pfxBase64 = $pfxBase64 -replace '-', '+' -replace '_', '/'
+          $pfxBase64 = ($pfxBase64 -replace '[^A-Za-z0-9+/=]', '').TrimEnd('=')
+          $pfxBase64 = $pfxBase64.PadRight([math]::Ceiling($pfxBase64.Length / 4) * 4, '=')
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
 
           try {
@@ -229,7 +235,13 @@ jobs:
             }
 
             $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-            $pfxBase64 = $env:CODE_SIGN_PFX -replace '\s', ''
+            $pfxBase64 = $env:CODE_SIGN_PFX
+            if ($pfxBase64 -match '(?s)-----BEGIN[^-]*-----(.+?)-----END[^-]*-----') {
+              $pfxBase64 = $Matches[1]
+            }
+            $pfxBase64 = $pfxBase64 -replace '-', '+' -replace '_', '/'
+            $pfxBase64 = ($pfxBase64 -replace '[^A-Za-z0-9+/=]', '').TrimEnd('=')
+            $pfxBase64 = $pfxBase64.PadRight([math]::Ceiling($pfxBase64.Length / 4) * 4, '=')
             [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
 
             try {
