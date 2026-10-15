@@ -61,18 +61,13 @@ jobs:
         run: |
           $publishDir = "artifacts/ci-publish"
 
-          # compute a short sha, run number, and latest tag for artifact naming
-          $shortSha = $env:GITHUB_SHA.Substring(0,7)
-          $runNum = $env:GITHUB_RUN_NUMBER
-
+          # latest tag for artifact naming
           $latestTag = git describe --tags --abbrev=0 2>$null
           if (-not $latestTag) {
             Write-Host "No tags found, falling back to v0.0.0"
             $latestTag = "v0.0.0"
           }
           Write-Host "Latest tag: $latestTag"
-
-          $zipFile = "artifacts/ForcePlateDevTool-$latestTag-CI-$runNum-$shortSha.zip"
 
           Write-Host "Publish output: $publishDir"
           New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
@@ -87,19 +82,13 @@ jobs:
             throw "dotnet publish failed"
           }
 
-          Compress-Archive -Path "$publishDir/*" -DestinationPath $zipFile -CompressionLevel Optimal
-
-          if (-not (Test-Path $zipFile)) {
-            throw "CI zip not created"
-          }
-
-          echo "CI_ARTIFACT=$zipFile" | Out-File $env:GITHUB_ENV -Append
+          echo "CI_ARTIFACT=$publishDir" | Out-File $env:GITHUB_ENV -Append
           echo "CI_LATEST_TAG=$latestTag" | Out-File $env:GITHUB_ENV -Append
 
       - name: Upload CI package (Release only)
         if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
-          name: ForcePlateDevTool-${{ env.CI_LATEST_TAG }}.zip
+          name: ForcePlateDevTool-${{ env.CI_LATEST_TAG }}
           path: ${{ env.CI_ARTIFACT }}
           if-no-files-found: error
