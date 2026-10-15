@@ -16,6 +16,7 @@ jobs:
   release:
     name: Build and publish Windows x64 release
     runs-on: windows-latest
+    environment: production
 
     steps:
       - name: Checkout tagged source
@@ -27,6 +28,16 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+
+      - name: Setup NuGet cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/.local/share/NuGet/v3-cache
+          key: dotnet-cache-release-${{ runner.os }}-${{ hashFiles('**/Directory.Build.props','**/*.csproj') }}
+          restore-keys: |
+            dotnet-cache-release-${{ runner.os }}-
 
       - name: Validate release tag and source branch
         shell: pwsh
@@ -72,6 +83,9 @@ jobs:
           $project = "src/ForcePlateDevTool/ForcePlateDevTool.csproj"
           $infoVersion = "$($env:RELEASE_VERSION)+$($env:SHORT_SHA)"
 
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $publishDir
+          New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
+
           dotnet publish $project `
             --configuration Release `
             --runtime win-x64 `
@@ -109,6 +123,8 @@ jobs:
 
       - name: Build installer, ZIP, and SHA-256 checksums
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
         run: |
           choco install innosetup --no-progress -y
           if ($LASTEXITCODE -ne 0) {
@@ -120,6 +136,8 @@ jobs:
             throw "Inno Setup compiler not found: $iscc"
           }
 
+          # Compile installer (RELEASE_VERSION read by the installer script via GetEnv)
+          Write-Host "Compiling installer with ISCC: $iscc"
           & $iscc "installer/ForcePlateDevTool.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "Installer compilation failed"
@@ -129,49 +147,75 @@ jobs:
           $zip = "artifacts/ForcePlateDevTool-v$version-win-x64.zip"
           $setup = "artifacts/ForcePlateDevTool-Setup-v$version.exe"
 
-          Compress-Archive `
-            -Path "artifacts/publish/*" `
-            -DestinationPath $zip `
-            -CompressionLevel Optimal
+          # Create portable ZIP from published files
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "artifacts/publish/*" -DestinationPath $zip -CompressionLevel Optimal
+
+          if (-not (Test-Path $zip)) {
+            throw "ZIP creation failed: $zip"
+          }
 
           if (-not (Test-Path $setup)) {
             throw "Installer output not found: $setup"
           }
 
+          # Optional code-signing step (only if secrets.CODE_SIGN_PFX and secrets.CODESIGN_PASSWORD are configured)
+          if ($env:CODE_SIGN_PFX -and $env:CODESIGN_PASSWORD) {
+            Write-Host "Signing installer and primary exe (attempt)."
+            $pfxBase64 = $env:CODE_SIGN_PFX
+            $pfxPath = "artifacts/codesign.pfx"
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
+
+            # Import certificate to CurrentUser\My temporary store and sign
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+            $cert.Import($pfxPath, $env:CODESIGN_PASSWORD, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+
+            # Use signtool if available
+            $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
+            if (-not (Test-Path $signtool)) {
+              Write-Host "signtool not found at $signtool; skipping signing step."
+            } else {
+              & $signtool sign /fd SHA256 /a /f $pfxPath /p $env:CODESIGN_PASSWORD $setup
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "signtool failed to sign installer (continuing as optional)."
+              }
+            }
+          } else {
+            Write-Host "Code signing not configured; skipping signing step."
+          }
+
+          # Write SHA-256 checksums
           foreach ($file in @($zip, $setup)) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash
-            "$hash  $(Split-Path $file -Leaf)" |
-              Set-Content "$file.sha256" -Encoding ascii
+            "$hash  $(Split-Path $file -Leaf)" | Set-Content "$file.sha256" -Encoding ascii
           }
 
           "RELEASE_ZIP=$zip" | Out-File $env:GITHUB_ENV -Append
           "RELEASE_SETUP=$setup" | Out-File $env:GITHUB_ENV -Append
-          "RELEASE_ZIP_CHECKSUM=$zip.sha256" |
-            Out-File $env:GITHUB_ENV -Append
-          "RELEASE_SETUP_CHECKSUM=$setup.sha256" |
-            Out-File $env:GITHUB_ENV -Append
+          "RELEASE_ZIP_CHECKSUM=$zip.sha256" | Out-File $env:GITHUB_ENV -Append
+          "RELEASE_SETUP_CHECKSUM=$setup.sha256" | Out-File $env:GITHUB_ENV -Append
 
-      - name: Upload release packages as Actions artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub release (managed action)
+        id: create_release
+        uses: actions/create-release@v1
         with:
-          name: ForcePlateDevTool-v${{ env.RELEASE_VERSION }}-win-x64
-          path: |
-            ${{ env.RELEASE_ZIP }}
-            ${{ env.RELEASE_ZIP_CHECKSUM }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          release_name: "ForcePlateDevTool ${{ env.RELEASE_VERSION }}"
+          body: |
+            Auto-generated release for ${{ env.RELEASE_VERSION }}.
+            Commit: ${{ github.sha }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
             ${{ env.RELEASE_SETUP }}
             ${{ env.RELEASE_SETUP_CHECKSUM }}
-          if-no-files-found: error
-
-      - name: Publish GitHub Release
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.RELEASE_ZIP_CHECKSUM }}
         env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: |
-          gh release create $env:RELEASE_TAG `
-            "$env:RELEASE_SETUP" `
-            "$env:RELEASE_SETUP_CHECKSUM" `
-            "$env:RELEASE_ZIP" `
-            "$env:RELEASE_ZIP_CHECKSUM" `
-            --verify-tag `
-            --title "ForcePlateDevTool $env:RELEASE_VERSION" `
-            --generate-notes
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

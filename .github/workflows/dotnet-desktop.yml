@@ -13,7 +13,6 @@ permissions:
 jobs:
   build-and-test:
     runs-on: windows-latest
-
     strategy:
       fail-fast: false
       matrix:
@@ -28,26 +27,64 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Setup NuGet/dotnet cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/.local/share/NuGet/v3-cache
+          key: dotnet-cache-${{ runner.os }}-${{ hashFiles('**/Directory.Build.props','**/*.csproj') }}
+          restore-keys: |
+            dotnet-cache-${{ runner.os }}-
+
       - name: Restore solution
         run: dotnet restore ForcePlateDevTool.sln
 
       - name: Build solution
-        run: >
-          dotnet build ForcePlateDevTool.sln
-          --configuration ${{ matrix.configuration }}
-          --no-restore
+        run: |
+          dotnet build ForcePlateDevTool.sln \
+            --configuration ${{ matrix.configuration }} \
+            --no-restore
 
       - name: Run tests
-        run: >
-          dotnet test tests/ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj
-          --configuration ${{ matrix.configuration }}
-          --no-build
-          --logger "console;verbosity=normal"
+        run: |
+          dotnet test tests/ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj \
+            --configuration ${{ matrix.configuration }} \
+            --no-build \
+            --logger "console;verbosity=normal"
 
-      - name: Upload CI build (for testing only, not a release)
+      - name: Publish self-contained CI package (Release only)
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $publishDir = "artifacts/ci-publish"
+          $zipFile = "artifacts/ForcePlateDevTool-CI-${{ github.run_number }}-${{ github.sha.substring(0,7) }}.zip"
+
+          Write-Host "Publish output: $publishDir"
+          New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
+
+          dotnet publish src/ForcePlateDevTool/ForcePlateDevTool.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output $publishDir
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed"
+          }
+
+          Compress-Archive -Path "$publishDir/*" -DestinationPath $zipFile -CompressionLevel Optimal
+
+          if (-not (Test-Path $zipFile)) {
+            throw "CI zip not created"
+          }
+
+          echo "CI_ARTIFACT=$zipFile" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Upload CI package (Release only)
         if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
-          name: ForcePlateDevTool-CI-build
-          path: src/ForcePlateDevTool/bin/Release/net8.0-windows/
+          name: ForcePlateDevTool-CI-${{ github.run_number }}
+          path: ${{ env.CI_ARTIFACT }}
           if-no-files-found: error
