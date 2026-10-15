@@ -42,15 +42,15 @@ jobs:
 
       - name: Build solution
         run: |
-          dotnet build ForcePlateDevTool.sln \
-            --configuration ${{ matrix.configuration }} \
+          dotnet build ForcePlateDevTool.sln `
+            --configuration ${{ matrix.configuration }} `
             --no-restore
 
       - name: Run tests
         run: |
-          dotnet test tests/ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj \
-            --configuration ${{ matrix.configuration }} \
-            --no-build \
+          dotnet test tests/ForcePlateDevTool.Tests/ForcePlateDevTool.Tests.csproj `
+            --configuration ${{ matrix.configuration }} `
+            --no-build `
             --logger "console;verbosity=normal"
 
       - name: Publish self-contained CI package (Release only)
