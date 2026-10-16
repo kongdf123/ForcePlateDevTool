@@ -390,6 +390,11 @@ jobs:
             }
           }
 
+          # The pwsh shell propagates $LASTEXITCODE (still 2 from the tolerated
+          # MpCmdRun failures) as the step exit code when the script ends. Exit
+          # 0 explicitly; genuine failures above already throw before reaching this.
+          exit 0
+
       - name: Create GitHub release (managed action)
         id: create_release
         uses: actions/create-release@v1
